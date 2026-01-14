@@ -12,30 +12,33 @@ app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
 
-    // pega o email do cliente da Vindi
+    // extrai email e nome do payload REAL da Vindi
     const email =
-      payload?.customer?.email ||
-      payload?.subscription?.customer?.email;
+      payload?.event?.data?.subscription?.customer?.email ||
+      payload?.event?.data?.charge?.customer?.email;
 
     const name =
-      payload?.customer?.name ||
-      payload?.subscription?.customer?.name ||
+      payload?.event?.data?.subscription?.customer?.name ||
+      payload?.event?.data?.charge?.customer?.name ||
       "";
 
     if (!email) {
+      console.log("EMAIL NÃO ENCONTRADO NO PAYLOAD");
       return res.status(200).send("email não encontrado");
     }
 
-    // monta o payload para o RD
+    console.log("EMAIL ENCONTRADO:", email);
+
+    // payload para o RD
     const rdPayload = {
       email: email,
       name: name,
       tags: ["assinatura-criada-vindi"]
     };
 
-    // chamada para o RD Station
-    await axios.post(
-      "https://api.rd.services/platform/contacts",
+    // cria ou atualiza contato no RD Station
+    await axios.put(
+      `https://api.rd.services/platform/contacts/email:${email}`,
       rdPayload,
       {
         headers: {
@@ -45,14 +48,20 @@ app.post("/webhook/vindi", async (req, res) => {
       }
     );
 
+    console.log("CONTATO ENVIADO PARA O RD COM SUCESSO");
+
     return res.status(200).send("ok");
   } catch (error) {
-    console.error("ERRO RD:");
+    console.error("ERRO AO ENVIAR PARA O RD");
     console.error(error.response?.status);
-    console.error(error.response?.data);
-
+    console.error(error.response?.data || error.message);
     return res.status(200).send("erro tratado");
   }
+});
+
+// rota simples para teste manual
+app.get("/", (req, res) => {
+  res.status(200).send("online");
 });
 
 // porta obrigatória no Render
