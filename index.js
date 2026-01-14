@@ -47,7 +47,10 @@ app.post("/webhook/vindi", async (req, res) => {
 
     return res.status(200).send("ok");
   } catch (error) {
-    console.error(error.response?.data || error.message);
+    console.error("ERRO RD:");
+    console.error(error.response?.status);
+    console.error(error.response?.data);
+
     return res.status(200).send("erro tratado");
   }
 });
