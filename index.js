@@ -6,8 +6,9 @@ app.use(express.json());
 
 // rota que a Vindi vai chamar
 app.post("/webhook/vindi", async (req, res) => {
-  try {
-    const payload = req.body;
+  console.log("WEBHOOK DA VINDI CHEGOU");
+  console.log(JSON.stringify(req.body));
+
 
     // pega o email do cliente da Vindi
     const email =
