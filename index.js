@@ -9,6 +9,8 @@ app.post("/webhook/vindi", async (req, res) => {
   console.log("WEBHOOK DA VINDI CHEGOU");
   console.log(JSON.stringify(req.body));
 
+  try {
+    const payload = req.body;
 
     // pega o email do cliente da Vindi
     const email =
@@ -43,7 +45,6 @@ app.post("/webhook/vindi", async (req, res) => {
       }
     );
 
-    // responde ok para a Vindi
     return res.status(200).send("ok");
   } catch (error) {
     console.error(error.response?.data || error.message);
