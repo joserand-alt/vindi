@@ -40,7 +40,7 @@ app.post("/webhook/vindi", async (req, res) => {
     const payload = req.body;
 
     // ------------------------------
-    // FILTRA EVENTOS (EVITA DUPLICAÇÃO)
+    // FILTRA EVENTO CORRETO
     // ------------------------------
     const eventType = payload?.event?.type;
 
@@ -50,7 +50,7 @@ app.post("/webhook/vindi", async (req, res) => {
     }
 
     // ------------------------------
-    // EXTRAI DADOS DO PAYLOAD
+    // EXTRAI DADOS
     // ------------------------------
     const email =
       payload?.event?.data?.subscription?.customer?.email;
@@ -66,18 +66,21 @@ app.post("/webhook/vindi", async (req, res) => {
     console.log("EMAIL ENCONTRADO:", email);
 
     // ------------------------------
-    // OAUTH: GERA ACCESS TOKEN
+    // GERA ACCESS TOKEN
     // ------------------------------
     const accessToken = await getAccessToken();
 
     // ------------------------------
-    // ENVIA PARA RD STATION MARKETING
+    // ENVIA PARA O RD (ENDPOINT ESTÁVEL)
     // ------------------------------
-    await axios.put(
-      `https://api.rd.services/platform/contacts/email:${email}`,
+    await axios.post(
+      "https://api.rd.services/platform/contacts",
       {
-        email: email,
         name: name,
+        email: email,
+        identifiers: {
+          email: email
+        },
         tags: ["assinatura-criada-vindi"]
       },
       {
@@ -101,7 +104,6 @@ app.post("/webhook/vindi", async (req, res) => {
       console.error(error.message);
     }
 
-    // A Vindi SEMPRE precisa receber 200
     return res.status(200).send("erro tratado");
   }
 });
