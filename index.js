@@ -46,29 +46,40 @@ app.post("/webhook/vindi", async (req, res) => {
       return res.status(200).send("evento ignorado");
     }
 
-    const customer = payload?.event?.data?.subscription?.customer;
+    const subscription = payload?.event?.data?.subscription;
+    const customer = subscription?.customer;
+
     const email = customer?.email;
     const name = customer?.name || "";
 
     if (!email) {
-      console.log("EMAILEMAIL NÃO ENCONTRADO NO PAYLOAD");
+      console.log("EMAIL NÃO ENCONTRADO");
       return res.status(200).send("email ausente");
     }
 
-    console.log("EMAIL ENCONTRADO:", email);
+    // ==================================================
+    // NOME DO PRODUTO / PLANO
+    // ==================================================
+
+    const productName =
+      subscription?.plan?.name ||
+      subscription?.product?.name;
+
+    if (!productName) {
+      console.log("PRODUTO NÃO IDENTIFICADO");
+    } else {
+      console.log("PRODUTO IDENTIFICADO:", productName);
+    }
 
     const accessToken = await getAccessToken();
 
     // ==================================================
-    // PASSO 1 – GARANTE QUE O CONTATO EXISTE (PATCH)
-    // NÃO ENVIAR EMAIL NO BODY
+    // PASSO 1 – GARANTE CONTATO (PATCH)
     // ==================================================
 
     await axios.patch(
       `https://api.rd.services/platform/contacts/email:${email}`,
-      {
-        name: name
-      },
+      { name },
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -77,17 +88,19 @@ app.post("/webhook/vindi", async (req, res) => {
       }
     );
 
-    console.log("CONTATO CRIADO OU ATUALIZADO");
+    // ==================================================
+    // PASSO 2 – ADICIONA TAGS
+    // ==================================================
 
-    // ==================================================
-    // PASSO 2 – ADICIONA TAG (ACUMULATIVA)
-    // ==================================================
+    const tags = ["assinatura-criada-vindi"];
+
+    if (productName) {
+      tags.push(productName);
+    }
 
     await axios.post(
       `https://api.rd.services/platform/contacts/email:${email}/tag`,
-      {
-        tags: ["assinatura-criada-vindi"]
-      },
+      { tags },
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -96,11 +109,11 @@ app.post("/webhook/vindi", async (req, res) => {
       }
     );
 
-    console.log("TAG ADICIONADA AO CONTATO");
+    console.log("TAGS APLICADAS:", tags);
 
     return res.status(200).send("ok");
   } catch (error) {
-    console.error("ERRO NO PROCESSAMENTO DO WEBHOOK");
+    console.error("ERRO NO PROCESSAMENTO");
 
     if (error.response) {
       console.error("STATUS:", error.response.status);
@@ -109,22 +122,17 @@ app.post("/webhook/vindi", async (req, res) => {
       console.error(error.message);
     }
 
-    // A Vindi SEMPRE deve receber 200
     return res.status(200).send("erro tratado");
   }
 });
 
 // ======================================================
-// ROTA DE SAÚDE
+// HEALTHCHECK
 // ======================================================
 
 app.get("/", (req, res) => {
   res.status(200).send("online");
 });
-
-// ======================================================
-// START SERVER
-// ======================================================
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
