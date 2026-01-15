@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 // ======================================================
-// FUNÇÃO: GERAR ACCESS TOKEN VIA REFRESH TOKEN (RD)
+// OAUTH RD – ACCESS TOKEN VIA REFRESH TOKEN
 // ======================================================
 
 async function getAccessToken() {
@@ -29,7 +29,7 @@ async function getAccessToken() {
 }
 
 // ======================================================
-// WEBHOOK DA VINDI
+// WEBHOOK VINDI
 // ======================================================
 
 app.post("/webhook/vindi", async (req, res) => {
@@ -38,49 +38,54 @@ app.post("/webhook/vindi", async (req, res) => {
 
   try {
     const payload = req.body;
-
-    // ------------------------------
-    // FILTRA EVENTO CORRETO
-    // ------------------------------
     const eventType = payload?.event?.type;
 
+    // Processa apenas criação de assinatura
     if (eventType !== "subscription_created") {
       console.log("EVENTO IGNORADO:", eventType);
       return res.status(200).send("evento ignorado");
     }
 
-    // ------------------------------
-    // EXTRAI DADOS
-    // ------------------------------
-    const email =
-      payload?.event?.data?.subscription?.customer?.email;
-
-    const name =
-      payload?.event?.data?.subscription?.customer?.name || "";
+    const customer = payload?.event?.data?.subscription?.customer;
+    const email = customer?.email;
+    const name = customer?.name || "";
 
     if (!email) {
-      console.log("EMAIL NÃO ENCONTRADO NO PAYLOAD");
-      return res.status(200).send("email não encontrado");
+      console.log("EMAILEMAIL NÃO ENCONTRADO NO PAYLOAD");
+      return res.status(200).send("email ausente");
     }
 
     console.log("EMAIL ENCONTRADO:", email);
 
-    // ------------------------------
-    // GERA ACCESS TOKEN
-    // ------------------------------
     const accessToken = await getAccessToken();
 
-    // ------------------------------
-    // ENVIA PARA O RD (ENDPOINT ESTÁVEL)
-    // ------------------------------
-    await axios.post(
-      "https://api.rd.services/platform/contacts",
+    // ==================================================
+    // PASSO 1 – GARANTE QUE O CONTATO EXISTE (PATCH)
+    // NÃO ENVIAR EMAIL NO BODY
+    // ==================================================
+
+    await axios.patch(
+      `https://api.rd.services/platform/contacts/email:${email}`,
       {
-        name: name,
-        email: email,
-        identifiers: {
-          email: email
-        },
+        name: name
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    console.log("CONTATO CRIADO OU ATUALIZADO");
+
+    // ==================================================
+    // PASSO 2 – ADICIONA TAG (ACUMULATIVA)
+    // ==================================================
+
+    await axios.post(
+      `https://api.rd.services/platform/contacts/email:${email}/tag`,
+      {
         tags: ["assinatura-criada-vindi"]
       },
       {
@@ -91,7 +96,7 @@ app.post("/webhook/vindi", async (req, res) => {
       }
     );
 
-    console.log("CONTATO CRIADO / ATUALIZADO NO RD");
+    console.log("TAG ADICIONADA AO CONTATO");
 
     return res.status(200).send("ok");
   } catch (error) {
@@ -104,12 +109,13 @@ app.post("/webhook/vindi", async (req, res) => {
       console.error(error.message);
     }
 
+    // A Vindi SEMPRE deve receber 200
     return res.status(200).send("erro tratado");
   }
 });
 
 // ======================================================
-// ROTA DE TESTE
+// ROTA DE SAÚDE
 // ======================================================
 
 app.get("/", (req, res) => {
