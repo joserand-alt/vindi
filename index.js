@@ -21,11 +21,13 @@ async function getAccessToken() {
     {
       client_id: process.env.RD_CLIENT_ID,
       client_secret: process.env.RD_CLIENT_SECRET,
-      refresh_token: process.env.RD_REFRESH_TOKEN
+      refresh_token: process.env.RD_REFRESH_TOKEN,
+      grant_type: "refresh_token"
     },
     {
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json"
       }
     }
   );
@@ -44,7 +46,7 @@ app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
 
-    // Extrai dados do payload REAL da Vindi
+    // Extrai email e nome do payload REAL da Vindi
     const email =
       payload?.event?.data?.subscription?.customer?.email ||
       payload?.event?.data?.charge?.customer?.email;
@@ -61,17 +63,17 @@ app.post("/webhook/vindi", async (req, res) => {
 
     console.log("EMAIL ENCONTRADO:", email);
 
-    // 1️⃣ Gera access_token usando refresh_token
+    // 1) Gera access_token usando refresh_token
     const accessToken = await getAccessToken();
 
-    // 2️⃣ Monta payload para o RD
+    // 2) Payload para o RD
     const rdPayload = {
       email: email,
       name: name,
       tags: ["assinatura-criada-vindi"]
     };
 
-    // 3️⃣ Cria ou atualiza contato no RD Station Marketing
+    // 3) Cria ou atualiza contato no RD Station Marketing
     await axios.put(
       `${RD_CONTACT_URL}${email}`,
       rdPayload,
@@ -96,7 +98,7 @@ app.post("/webhook/vindi", async (req, res) => {
       console.error(error.message);
     }
 
-    // SEMPRE responder 200 para a Vindi
+    // Sempre responder 200 para a Vindi
     return res.status(200).send("erro tratado");
   }
 });
@@ -117,4 +119,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Webhook rodando");
 });
+
 
