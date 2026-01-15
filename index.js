@@ -4,7 +4,39 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-// rota que a Vindi vai chamar
+// ==============================
+// CONFIGURAÇÕES RD STATION
+// ==============================
+
+const RD_TOKEN_URL = "https://api.rd.services/auth/token";
+const RD_CONTACT_URL = "https://api.rd.services/platform/contacts/email:";
+
+// ==============================
+// FUNÇÃO: GERAR ACCESS TOKEN
+// ==============================
+
+async function getAccessToken() {
+  const response = await axios.post(
+    RD_TOKEN_URL,
+    {
+      client_id: process.env.RD_CLIENT_ID,
+      client_secret: process.env.RD_CLIENT_SECRET,
+      refresh_token: process.env.RD_REFRESH_TOKEN
+    },
+    {
+      headers: {
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
+  return response.data.access_token;
+}
+
+// ==============================
+// WEBHOOK DA VINDI
+// ==============================
+
 app.post("/webhook/vindi", async (req, res) => {
   console.log("WEBHOOK DA VINDI CHEGOU");
   console.log(JSON.stringify(req.body));
@@ -12,7 +44,7 @@ app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
 
-    // extrai email e nome do payload REAL da Vindi
+    // Extrai dados do payload REAL da Vindi
     const email =
       payload?.event?.data?.subscription?.customer?.email ||
       payload?.event?.data?.charge?.customer?.email;
@@ -29,43 +61,60 @@ app.post("/webhook/vindi", async (req, res) => {
 
     console.log("EMAIL ENCONTRADO:", email);
 
-    // payload para o RD
+    // 1️⃣ Gera access_token usando refresh_token
+    const accessToken = await getAccessToken();
+
+    // 2️⃣ Monta payload para o RD
     const rdPayload = {
       email: email,
       name: name,
       tags: ["assinatura-criada-vindi"]
     };
 
-    // cria ou atualiza contato no RD Station
+    // 3️⃣ Cria ou atualiza contato no RD Station Marketing
     await axios.put(
-      `https://api.rd.services/platform/contacts/email:${email}`,
+      `${RD_CONTACT_URL}${email}`,
       rdPayload,
       {
         headers: {
-          Authorization: `Bearer ${process.env.RD_API_TOKEN}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json"
         }
       }
     );
 
-    console.log("CONTATO ENVIADO PARA O RD COM SUCESSO");
+    console.log("CONTATO CRIADO / ATUALIZADO NO RD");
 
     return res.status(200).send("ok");
   } catch (error) {
-    console.error("ERRO AO ENVIAR PARA O RD");
-    console.error(error.response?.status);
-    console.error(error.response?.data || error.message);
+    console.error("ERRO NO PROCESSAMENTO DO WEBHOOK");
+
+    if (error.response) {
+      console.error("STATUS:", error.response.status);
+      console.error("DATA:", JSON.stringify(error.response.data));
+    } else {
+      console.error(error.message);
+    }
+
+    // SEMPRE responder 200 para a Vindi
     return res.status(200).send("erro tratado");
   }
 });
 
-// rota simples para teste manual
+// ==============================
+// ROTA DE TESTE
+// ==============================
+
 app.get("/", (req, res) => {
   res.status(200).send("online");
 });
 
-// porta obrigatória no Render
+// ==============================
+// START SERVER
+// ==============================
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Webhook rodando");
 });
+
