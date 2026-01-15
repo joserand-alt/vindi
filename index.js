@@ -5,29 +5,22 @@ const app = express();
 app.use(express.json());
 
 // ==============================
-// CONFIGURAÇÕES RD STATION
-// ==============================
-
-const RD_TOKEN_URL = "https://api.rd.services/auth/token";
-const RD_CONTACT_URL = "https://api.rd.services/platform/contacts/email:";
-
-// ==============================
-// FUNÇÃO: GERAR ACCESS TOKEN
+// FUNÇÃO: GERAR ACCESS TOKEN RD
 // ==============================
 
 async function getAccessToken() {
+  const params = new URLSearchParams();
+  params.append("client_id", process.env.RD_CLIENT_ID);
+  params.append("client_secret", process.env.RD_CLIENT_SECRET);
+  params.append("refresh_token", process.env.RD_REFRESH_TOKEN);
+  params.append("grant_type", "refresh_token");
+
   const response = await axios.post(
-    RD_TOKEN_URL,
-    {
-      client_id: process.env.RD_CLIENT_ID,
-      client_secret: process.env.RD_CLIENT_SECRET,
-      refresh_token: process.env.RD_REFRESH_TOKEN,
-      grant_type: "refresh_token"
-    },
+    "https://api.rd.services/auth/token",
+    params.toString(),
     {
       headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Content-Type": "application/x-www-form-urlencoded"
       }
     }
   );
@@ -46,7 +39,6 @@ app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
 
-    // Extrai email e nome do payload REAL da Vindi
     const email =
       payload?.event?.data?.subscription?.customer?.email ||
       payload?.event?.data?.charge?.customer?.email;
@@ -63,20 +55,17 @@ app.post("/webhook/vindi", async (req, res) => {
 
     console.log("EMAIL ENCONTRADO:", email);
 
-    // 1) Gera access_token usando refresh_token
+    // 1️⃣ Gera access token válido
     const accessToken = await getAccessToken();
 
-    // 2) Payload para o RD
-    const rdPayload = {
-      email: email,
-      name: name,
-      tags: ["assinatura-criada-vindi"]
-    };
-
-    // 3) Cria ou atualiza contato no RD Station Marketing
+    // 2️⃣ Cria ou atualiza contato no RD Station Marketing
     await axios.put(
-      `${RD_CONTACT_URL}${email}`,
-      rdPayload,
+      `https://api.rd.services/platform/contacts/email:${email}`,
+      {
+        email: email,
+        name: name,
+        tags: ["assinatura-criada-vindi"]
+      },
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -98,7 +87,6 @@ app.post("/webhook/vindi", async (req, res) => {
       console.error(error.message);
     }
 
-    // Sempre responder 200 para a Vindi
     return res.status(200).send("erro tratado");
   }
 });
