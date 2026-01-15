@@ -29,6 +29,40 @@ async function getAccessToken() {
 }
 
 // ======================================================
+// FUNÇÃO AUXILIAR – GARANTIR CONTATO NO RD
+// ======================================================
+
+async function ensureContact({ email, name, accessToken }) {
+  await axios.patch(
+    `https://api.rd.services/platform/contacts/email:${email}`,
+    { name },
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
+// ======================================================
+// FUNÇÃO AUXILIAR – ADICIONAR TAGS
+// ======================================================
+
+async function addTags({ email, tags, accessToken }) {
+  await axios.post(
+    `https://api.rd.services/platform/contacts/email:${email}/tag`,
+    { tags },
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
+// ======================================================
 // WEBHOOK VINDI
 // ======================================================
 
@@ -40,76 +74,82 @@ app.post("/webhook/vindi", async (req, res) => {
     const payload = req.body;
     const eventType = payload?.event?.type;
 
-    // Processa apenas criação de assinatura
-    if (eventType !== "subscription_created") {
-      console.log("EVENTO IGNORADO:", eventType);
-      return res.status(200).send("evento ignorado");
-    }
-
-    const subscription = payload?.event?.data?.subscription;
-    const customer = subscription?.customer;
-
-    const email = customer?.email;
-    const name = customer?.name || "";
-
-    if (!email) {
-      console.log("EMAIL NÃO ENCONTRADO");
-      return res.status(200).send("email ausente");
-    }
-
-    // ==================================================
-    // NOME DO PRODUTO / PLANO
-    // ==================================================
-
-    const productName =
-      subscription?.plan?.name ||
-      subscription?.product?.name;
-
-    if (!productName) {
-      console.log("PRODUTO NÃO IDENTIFICADO");
-    } else {
-      console.log("PRODUTO IDENTIFICADO:", productName);
-    }
-
     const accessToken = await getAccessToken();
 
     // ==================================================
-    // PASSO 1 – GARANTE CONTATO (PATCH)
+    // EVENTO: ASSINATURA CRIADA
     // ==================================================
 
-    await axios.patch(
-      `https://api.rd.services/platform/contacts/email:${email}`,
-      { name },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        }
+    if (eventType === "subscription_created") {
+      const subscription = payload?.event?.data?.subscription;
+      const customer = subscription?.customer;
+
+      const email = customer?.email;
+      const name = customer?.name || "";
+
+      if (!email) {
+        return res.status(200).send("email ausente");
       }
-    );
 
-    // ==================================================
-    // PASSO 2 – ADICIONA TAGS
-    // ==================================================
+      const productName =
+        subscription?.plan?.name ||
+        subscription?.product?.name;
 
-    const tags = ["assinatura-criada-vindi"];
+      const tags = ["assinatura-criada-vindi"];
 
-    if (productName) {
-      tags.push(productName.toLowerCase());
+      if (productName) {
+        tags.push(productName.toLowerCase());
+      }
+
+      await ensureContact({ email, name, accessToken });
+      await addTags({ email, tags, accessToken });
+
+      console.log("ASSINATURA PROCESSADA");
     }
 
-    await axios.post(
-      `https://api.rd.services/platform/contacts/email:${email}/tag`,
-      { tags },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
+    // ==================================================
+    // EVENTO: COBRANÇA GERADA (BILL CREATED)
+    // ==================================================
 
-    console.log("TAGS APLICADAS:", tags);
+    if (eventType === "bill_created") {
+      const bill = payload?.event?.data?.bill;
+      const customer = bill?.customer;
+
+      const email = customer?.email;
+      const name = customer?.name || "";
+
+      if (!email) {
+        return res.status(200).send("email ausente");
+      }
+
+      const billItems = bill?.bill_items || [];
+
+      const productTags = billItems
+        .map(item => item?.product?.name)
+        .filter(Boolean)
+        .map(name => name.toLowerCase());
+
+      const tags = [
+        "cobrança gerada",
+        ...productTags
+      ];
+
+      await ensureContact({ email, name, accessToken });
+      await addTags({ email, tags, accessToken });
+
+      console.log("COBRANÇA GERADA PROCESSADA");
+    }
+
+    // ==================================================
+    // EVENTOS NÃO TRATADOS
+    // ==================================================
+
+    if (
+      eventType !== "subscription_created" &&
+      eventType !== "bill_created"
+    ) {
+      console.log("EVENTO IGNORADO:", eventType);
+    }
 
     return res.status(200).send("ok");
   } catch (error) {
@@ -138,3 +178,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Webhook rodando");
 });
+
