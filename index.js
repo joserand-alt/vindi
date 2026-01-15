@@ -95,7 +95,7 @@ app.post("/webhook/vindi", async (req, res) => {
     const tags = ["assinatura-criada-vindi"];
 
     if (productName) {
-      tags.push(productName);
+      tags.push(productName.toLowerCase());
     }
 
     await axios.post(
