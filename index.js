@@ -4,9 +4,9 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-// ==============================
-// FUNÇÃO: GERAR ACCESS TOKEN RD
-// ==============================
+// ======================================================
+// FUNÇÃO: GERAR ACCESS TOKEN VIA REFRESH TOKEN (RD)
+// ======================================================
 
 async function getAccessToken() {
   const params = new URLSearchParams();
@@ -28,9 +28,9 @@ async function getAccessToken() {
   return response.data.access_token;
 }
 
-// ==============================
+// ======================================================
 // WEBHOOK DA VINDI
-// ==============================
+// ======================================================
 
 app.post("/webhook/vindi", async (req, res) => {
   console.log("WEBHOOK DA VINDI CHEGOU");
@@ -39,14 +39,24 @@ app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
 
+    // ------------------------------
+    // FILTRA EVENTOS (EVITA DUPLICAÇÃO)
+    // ------------------------------
+    const eventType = payload?.event?.type;
+
+    if (eventType !== "subscription_created") {
+      console.log("EVENTO IGNORADO:", eventType);
+      return res.status(200).send("evento ignorado");
+    }
+
+    // ------------------------------
+    // EXTRAI DADOS DO PAYLOAD
+    // ------------------------------
     const email =
-      payload?.event?.data?.subscription?.customer?.email ||
-      payload?.event?.data?.charge?.customer?.email;
+      payload?.event?.data?.subscription?.customer?.email;
 
     const name =
-      payload?.event?.data?.subscription?.customer?.name ||
-      payload?.event?.data?.charge?.customer?.name ||
-      "";
+      payload?.event?.data?.subscription?.customer?.name || "";
 
     if (!email) {
       console.log("EMAIL NÃO ENCONTRADO NO PAYLOAD");
@@ -55,10 +65,14 @@ app.post("/webhook/vindi", async (req, res) => {
 
     console.log("EMAIL ENCONTRADO:", email);
 
-    // 1️⃣ Gera access token válido
+    // ------------------------------
+    // OAUTH: GERA ACCESS TOKEN
+    // ------------------------------
     const accessToken = await getAccessToken();
 
-    // 2️⃣ Cria ou atualiza contato no RD Station Marketing
+    // ------------------------------
+    // ENVIA PARA RD STATION MARKETING
+    // ------------------------------
     await axios.put(
       `https://api.rd.services/platform/contacts/email:${email}`,
       {
@@ -87,25 +101,24 @@ app.post("/webhook/vindi", async (req, res) => {
       console.error(error.message);
     }
 
+    // A Vindi SEMPRE precisa receber 200
     return res.status(200).send("erro tratado");
   }
 });
 
-// ==============================
+// ======================================================
 // ROTA DE TESTE
-// ==============================
+// ======================================================
 
 app.get("/", (req, res) => {
   res.status(200).send("online");
 });
 
-// ==============================
+// ======================================================
 // START SERVER
-// ==============================
+// ======================================================
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Webhook rodando");
 });
-
-
