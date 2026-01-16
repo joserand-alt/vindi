@@ -1,11 +1,21 @@
 const express = require("express");
 const axios = require("axios");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
 
 // ======================================================
-// OAUTH RD – ACCESS TOKEN VIA REFRESH TOKEN
+// POSTGRESQL
+// ======================================================
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// ======================================================
+// RD OAUTH
 // ======================================================
 
 async function getAccessToken() {
@@ -18,47 +28,63 @@ async function getAccessToken() {
   const response = await axios.post(
     "https://api.rd.services/auth/token",
     params.toString(),
-    {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      }
-    }
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
   );
 
   return response.data.access_token;
 }
 
 // ======================================================
-// FUNÇÃO AUXILIAR – GARANTIR CONTATO NO RD
+// DATABASE HELPERS
 // ======================================================
 
-async function ensureContact({ email, name, accessToken }) {
-  await axios.patch(
-    `https://api.rd.services/platform/contacts/email:${email}`,
-    { name },
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      }
-    }
+async function upsertCustomer({ vindiId, name, email }) {
+  const result = await pool.query(
+    `
+    INSERT INTO customers (vindi_customer_id, name, email)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (email)
+    DO UPDATE SET name = EXCLUDED.name
+    RETURNING id
+    `,
+    [vindiId, name, email]
+  );
+  return result.rows[0].id;
+}
+
+async function insertSubscription({ vindiId, customerId, productName, status, createdAt }) {
+  await pool.query(
+    `
+    INSERT INTO subscriptions
+    (vindi_subscription_id, customer_id, product_name, status, created_at)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT DO NOTHING
+    `,
+    [vindiId, customerId, productName, status, createdAt]
   );
 }
 
-// ======================================================
-// FUNÇÃO AUXILIAR – ADICIONAR TAGS
-// ======================================================
+async function insertBill({ vindiId, customerId, productName, amount, status, dueAt, createdAt }) {
+  await pool.query(
+    `
+    INSERT INTO bills
+    (vindi_bill_id, customer_id, product_name, amount, status, due_at, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT DO NOTHING
+    `,
+    [vindiId, customerId, productName, amount, status, dueAt, createdAt]
+  );
+}
 
-async function addTags({ email, tags, accessToken }) {
-  await axios.post(
-    `https://api.rd.services/platform/contacts/email:${email}/tag`,
-    { tags },
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      }
-    }
+async function insertCharge({ vindiId, billId, amount, status, method, paidAt, createdAt }) {
+  await pool.query(
+    `
+    INSERT INTO charges
+    (vindi_charge_id, bill_id, amount, status, payment_method, paid_at, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT DO NOTHING
+    `,
+    [vindiId, billId, amount, status, method, paidAt, createdAt]
   );
 }
 
@@ -67,101 +93,96 @@ async function addTags({ email, tags, accessToken }) {
 // ======================================================
 
 app.post("/webhook/vindi", async (req, res) => {
-  console.log("WEBHOOK DA VINDI CHEGOU");
-  console.log(JSON.stringify(req.body));
-
   try {
     const payload = req.body;
     const eventType = payload?.event?.type;
 
-    const accessToken = await getAccessToken();
+    console.log("EVENTO RECEBIDO:", eventType);
 
-    // ==================================================
-    // EVENTO: ASSINATURA CRIADA
-    // ==================================================
-
+    // ===============================
+    // ASSINATURA CRIADA
+    // ===============================
     if (eventType === "subscription_created") {
-      const subscription = payload?.event?.data?.subscription;
-      const customer = subscription?.customer;
+      const subscription = payload.event.data.subscription;
+      const customer = subscription.customer;
 
-      const email = customer?.email;
-      const name = customer?.name || "";
-
-      if (!email) {
-        return res.status(200).send("email ausente");
-      }
+      const customerId = await upsertCustomer({
+        vindiId: customer.id,
+        name: customer.name,
+        email: customer.email
+      });
 
       const productName =
-        subscription?.plan?.name ||
-        subscription?.product?.name;
+        subscription.plan?.name ||
+        subscription.product?.name ||
+        null;
 
-      const tags = ["assinatura-criada-vindi"];
-
-      if (productName) {
-        tags.push(productName.toLowerCase());
-      }
-
-      await ensureContact({ email, name, accessToken });
-      await addTags({ email, tags, accessToken });
-
-      console.log("ASSINATURA PROCESSADA");
+      await insertSubscription({
+        vindiId: subscription.id,
+        customerId,
+        productName,
+        status: subscription.status,
+        createdAt: subscription.created_at
+      });
     }
 
-    // ==================================================
-    // EVENTO: COBRANÇA GERADA (BILL CREATED)
-    // ==================================================
-
+    // ===============================
+    // COBRANÇA GERADA
+    // ===============================
     if (eventType === "bill_created") {
-      const bill = payload?.event?.data?.bill;
-      const customer = bill?.customer;
+      const bill = payload.event.data.bill;
+      const customer = bill.customer;
 
-      const email = customer?.email;
-      const name = customer?.name || "";
+      const customerId = await upsertCustomer({
+        vindiId: customer.id,
+        name: customer.name,
+        email: customer.email
+      });
 
-      if (!email) {
-        return res.status(200).send("email ausente");
-      }
+      const productName =
+        bill.bill_items?.[0]?.product?.name || null;
 
-      const billItems = bill?.bill_items || [];
-
-      const productTags = billItems
-        .map(item => item?.product?.name)
-        .filter(Boolean)
-        .map(name => name.toLowerCase());
-
-      const tags = [
-        "cobrança gerada",
-        ...productTags
-      ];
-
-      await ensureContact({ email, name, accessToken });
-      await addTags({ email, tags, accessToken });
-
-      console.log("COBRANÇA GERADA PROCESSADA");
+      await insertBill({
+        vindiId: bill.id,
+        customerId,
+        productName,
+        amount: bill.amount,
+        status: bill.status,
+        dueAt: bill.due_at,
+        createdAt: bill.created_at
+      });
     }
 
-    // ==================================================
-    // EVENTOS NÃO TRATADOS
-    // ==================================================
+    // ===============================
+    // PAGAMENTO CONFIRMADO
+    // ===============================
+    if (eventType === "charge_paid") {
+      const charge = payload.event.data.charge;
+      const billId = payload.event.data.bill?.id;
 
-    if (
-      eventType !== "subscription_created" &&
-      eventType !== "bill_created"
-    ) {
-      console.log("EVENTO IGNORADO:", eventType);
+      if (billId) {
+        const billResult = await pool.query(
+          `SELECT id FROM bills WHERE vindi_bill_id = $1`,
+          [billId]
+        );
+
+        if (billResult.rows.length > 0) {
+          await insertCharge({
+            vindiId: charge.id,
+            billId: billResult.rows[0].id,
+            amount: charge.amount,
+            status: charge.status,
+            method: charge.payment_method?.code,
+            paidAt: charge.paid_at,
+            createdAt: charge.created_at
+          });
+        }
+      }
     }
 
     return res.status(200).send("ok");
   } catch (error) {
-    console.error("ERRO NO PROCESSAMENTO");
-
-    if (error.response) {
-      console.error("STATUS:", error.response.status);
-      console.error("DATA:", JSON.stringify(error.response.data));
-    } else {
-      console.error(error.message);
-    }
-
+    console.error("ERRO WEBHOOK:", error.message);
     return res.status(200).send("erro tratado");
   }
 });
@@ -171,7 +192,7 @@ app.post("/webhook/vindi", async (req, res) => {
 // ======================================================
 
 app.get("/", (req, res) => {
-  res.status(200).send("online");
+  res.send("online");
 });
 
 const PORT = process.env.PORT || 3000;
