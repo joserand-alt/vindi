@@ -8,7 +8,6 @@ app.use(express.json());
 // ======================================================
 // POSTGRESQL
 // ======================================================
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -17,7 +16,6 @@ const pool = new Pool({
 // ======================================================
 // RD OAUTH
 // ======================================================
-
 async function getAccessToken() {
   const params = new URLSearchParams();
   params.append("client_id", process.env.RD_CLIENT_ID);
@@ -37,7 +35,6 @@ async function getAccessToken() {
 // ======================================================
 // DATABASE HELPERS
 // ======================================================
-
 async function upsertCustomer({ vindiId, name, email }) {
   const result = await pool.query(
     `
@@ -89,9 +86,31 @@ async function insertCharge({ vindiId, billId, amount, status, method, paidAt, c
 }
 
 // ======================================================
+// RD HELPERS
+// ======================================================
+async function updateRDContact({ email, name, tags }) {
+  const token = await getAccessToken();
+
+  await axios.patch(
+    `https://api.rd.services/platform/contacts/email:${email}`,
+    {
+      name,
+      tags: tags.map(t => t.toLowerCase())
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
+  console.log("RD ATUALIZADO:", email, tags);
+}
+
+// ======================================================
 // WEBHOOK VINDI
 // ======================================================
-
 app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
@@ -124,10 +143,16 @@ app.post("/webhook/vindi", async (req, res) => {
         status: subscription.status,
         createdAt: subscription.created_at
       });
+
+      await updateRDContact({
+        email: customer.email,
+        name: customer.name,
+        tags: ["assinatura-criada-vindi", productName || "assinatura"]
+      });
     }
 
     // ===============================
-    // COBRANÇA GERADA
+    // COBRANÇA CRIADA
     // ===============================
     if (eventType === "bill_created") {
       const bill = payload.event.data.bill;
@@ -151,38 +176,95 @@ app.post("/webhook/vindi", async (req, res) => {
         dueAt: bill.due_at,
         createdAt: bill.created_at
       });
+
+      await updateRDContact({
+        email: customer.email,
+        name: customer.name,
+        tags: ["cobranca-gerada-vindi", productName || "cobranca"]
+      });
     }
 
     // ===============================
-    // PAGAMENTO CONFIRMADO
+    // TENTATIVA DE PAGAMENTO
+    // ===============================
+    if (eventType === "charge_created") {
+      const charge = payload.event.data.charge;
+      const billId = payload.event.data.bill?.id;
+
+      if (!billId) return res.status(200).send("ok");
+
+      const billResult = await pool.query(
+        `SELECT id FROM bills WHERE vindi_bill_id = $1`,
+        [billId]
+      );
+
+      if (billResult.rows.length === 0) return res.status(200).send("ok");
+
+      await insertCharge({
+        vindiId: charge.id,
+        billId: billResult.rows[0].id,
+        amount: charge.amount,
+        status: charge.status,
+        method: charge.payment_method?.code,
+        paidAt: null,
+        createdAt: charge.created_at
+      });
+    }
+
+    // ===============================
+    // PAGAMENTO CONFIRMADO (PRINCIPAL)
+    // ===============================
+    if (eventType === "bill_paid") {
+      const bill = payload.event.data.bill;
+
+      const billResult = await pool.query(
+        `SELECT id FROM bills WHERE vindi_bill_id = $1`,
+        [bill.id]
+      );
+
+      if (billResult.rows.length === 0) return res.status(200).send("ok");
+
+      await insertCharge({
+        vindiId: bill.id,
+        billId: billResult.rows[0].id,
+        amount: bill.amount,
+        status: "paid",
+        method: bill.payment_profile?.payment_method?.code || null,
+        paidAt: bill.updated_at,
+        createdAt: bill.created_at
+      });
+    }
+
+    // ===============================
+    // PAGAMENTO CONFIRMADO (FALLBACK)
     // ===============================
     if (eventType === "charge_paid") {
       const charge = payload.event.data.charge;
       const billId = payload.event.data.bill?.id;
 
-      if (billId) {
-        const billResult = await pool.query(
-          `SELECT id FROM bills WHERE vindi_bill_id = $1`,
-          [billId]
-        );
+      if (!billId) return res.status(200).send("ok");
 
-        if (billResult.rows.length > 0) {
-          await insertCharge({
-            vindiId: charge.id,
-            billId: billResult.rows[0].id,
-            amount: charge.amount,
-            status: charge.status,
-            method: charge.payment_method?.code,
-            paidAt: charge.paid_at,
-            createdAt: charge.created_at
-          });
-        }
-      }
+      const billResult = await pool.query(
+        `SELECT id FROM bills WHERE vindi_bill_id = $1`,
+        [billId]
+      );
+
+      if (billResult.rows.length === 0) return res.status(200).send("ok");
+
+      await insertCharge({
+        vindiId: charge.id,
+        billId: billResult.rows[0].id,
+        amount: charge.amount,
+        status: "paid",
+        method: charge.payment_method?.code,
+        paidAt: charge.paid_at,
+        createdAt: charge.created_at
+      });
     }
 
     return res.status(200).send("ok");
   } catch (error) {
-    console.error("ERRO WEBHOOK:", error.message);
+    console.error("ERRO WEBHOOK:", error);
     return res.status(200).send("erro tratado");
   }
 });
@@ -190,7 +272,6 @@ app.post("/webhook/vindi", async (req, res) => {
 // ======================================================
 // HEALTHCHECK
 // ======================================================
-
 app.get("/", (req, res) => {
   res.send("online");
 });
