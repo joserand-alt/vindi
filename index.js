@@ -1,19 +1,8 @@
 const express = require("express");
 const axios = require("axios");
-const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
-
-// ==============================
-// POSTGRES
-// ==============================
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
 
 // ==============================
 // FUNÇÕES AUXILIARES
@@ -23,30 +12,9 @@ function normalizeTag(value) {
   return value.toString().trim().toLowerCase();
 }
 
-async function saveEventToDatabase(eventType, email, productName, payload) {
-  try {
-    await pool.query(
-      `
-      INSERT INTO webhook_events (
-        event_type,
-        email,
-        product_name,
-        payload
-      )
-      VALUES ($1, $2, $3, $4)
-      `,
-      [eventType, email, productName, payload]
-    );
-
-    console.log("EVENTO SALVO NO BANCO");
-  } catch (err) {
-    console.error("ERRO AO SALVAR NO BANCO:", err.message);
-  }
-}
-
 async function sendToRD(email, name, tags) {
   try {
-    // tenta buscar contato
+    // tenta buscar o contato
     await axios.get(
       `https://api.rd.services/platform/contacts/email:${email}`,
       {
@@ -56,7 +24,7 @@ async function sendToRD(email, name, tags) {
       }
     );
 
-    // contato existe, adiciona tag
+    // contato existe → adiciona tags
     await axios.post(
       `https://api.rd.services/platform/contacts/email:${email}/tag`,
       { tags },
@@ -68,10 +36,10 @@ async function sendToRD(email, name, tags) {
       }
     );
 
-    console.log("TAGS ATUALIZADAS NO RD");
+    console.log("RD: tags adicionadas");
   } catch (error) {
     if (error.response && error.response.status === 404) {
-      // contato não existe, cria
+      // contato não existe → cria
       await axios.post(
         "https://api.rd.services/platform/contacts",
         {
@@ -87,15 +55,18 @@ async function sendToRD(email, name, tags) {
         }
       );
 
-      console.log("CONTATO CRIADO NO RD");
+      console.log("RD: contato criado");
     } else {
-      console.error("ERRO AO ENVIAR PARA RD:", error.message);
+      console.error(
+        "ERRO AO ENVIAR PARA RD:",
+        error.response?.data || error.message
+      );
     }
   }
 }
 
 // ==============================
-// WEBHOOK
+// WEBHOOK DA VINDI
 // ==============================
 app.post("/webhook/vindi", async (req, res) => {
   try {
@@ -104,11 +75,19 @@ app.post("/webhook/vindi", async (req, res) => {
 
     console.log("EVENTO RECEBIDO:", eventType);
 
-    if (!["subscription_created", "bill_created", "bill_paid"].includes(eventType)) {
+    // eventos que vamos tratar
+    const allowedEvents = [
+      "subscription_created",
+      "bill_created",
+      "bill_paid"
+    ];
+
+    if (!allowedEvents.includes(eventType)) {
       console.log("EVENTO IGNORADO:", eventType);
       return res.status(200).send("ignored");
     }
 
+    // tenta achar o customer em diferentes estruturas
     const customer =
       data?.subscription?.customer ||
       data?.bill?.customer ||
@@ -122,8 +101,8 @@ app.post("/webhook/vindi", async (req, res) => {
     const email = customer.email;
     const name = customer.name || "";
 
+    // tenta extrair produto
     let productName = null;
-
     if (data?.bill?.bill_items?.length > 0) {
       productName = data.bill.bill_items[0]?.product?.name || null;
     }
@@ -133,15 +112,14 @@ app.post("/webhook/vindi", async (req, res) => {
       normalizeTag(productName)
     ].filter(Boolean);
 
-    // salva no banco sem travar o fluxo
-    saveEventToDatabase(eventType, email, productName, req.body);
+    console.log("EMAIL:", email);
+    console.log("TAGS:", tags);
 
-    // envia para RD sem travar o fluxo
-    sendToRD(email, name, tags);
+    await sendToRD(email, name, tags);
 
     return res.status(200).send("ok");
   } catch (err) {
-    console.error("ERRO WEBHOOK:", err.message);
+    console.error("ERRO NO WEBHOOK:", err.message);
     return res.status(200).send("error treated");
   }
 });
