@@ -1,6 +1,5 @@
 const express = require("express");
 const axios = require("axios");
-const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
@@ -11,16 +10,8 @@ app.use(express.json());
 
 const RD_EVENTS_URL = "https://api.rd.services/platform/events";
 
-// pool do banco (não trava o webhook se cair)
-const pool = process.env.DATABASE_URL
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
-    })
-  : null;
-
 /* ===============================
-   REGRAS DE CONVERSÃO
+   REGRAS DE CONVERSÃO (DE-PARA)
 ================================ */
 
 const CONVERSION_RULES = [
@@ -40,6 +31,7 @@ function normalize(text) {
 
 function resolveConversion(text) {
   if (!text) return null;
+
   const normalized = normalize(text);
 
   for (const rule of CONVERSION_RULES) {
@@ -53,18 +45,21 @@ function resolveConversion(text) {
 }
 
 /* ===============================
-   RD STATION
+   ENVIO DE CONVERSÃO PARA O RD
 ================================ */
 
-async function sendConversionToRD(email, eventIdentifier) {
-  await axios.post(
+async function sendConversionToRD(email, conversionIdentifier) {
+  console.log("ENVIANDO CONVERSÃO PARA RD:", conversionIdentifier);
+
+  const response = await axios.post(
     RD_EVENTS_URL,
     {
       event_type: "CONVERSION",
       event_family: "CDP",
+      timestamp: new Date().toISOString(),
       payload: {
-        conversion_identifier: eventIdentifier,
-        email
+        conversion_identifier: conversionIdentifier,
+        email: email
       }
     },
     {
@@ -74,79 +69,8 @@ async function sendConversionToRD(email, eventIdentifier) {
       }
     }
   );
-}
 
-/* ===============================
-   BANCO DE DADOS (SAFE)
-================================ */
-
-async function upsertCustomer(vindiCustomer) {
-  if (!pool) return;
-
-  try {
-    await pool.query(
-      `
-      INSERT INTO customers (vindi_customer_id, name, email)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (vindi_customer_id)
-      DO NOTHING
-      `,
-      [vindiCustomer.id, vindiCustomer.name, vindiCustomer.email]
-    );
-  } catch (err) {
-    console.error("ERRO AO SALVAR CUSTOMER:", err.message);
-  }
-}
-
-async function saveSubscription(subscription, customerId) {
-  if (!pool) return;
-
-  try {
-    await pool.query(
-      `
-      INSERT INTO subscriptions
-      (vindi_subscription_id, customer_id, product_name, plan_name, status)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (vindi_subscription_id)
-      DO NOTHING
-      `,
-      [
-        subscription.id,
-        customerId,
-        subscription.plan?.product?.name || null,
-        subscription.plan?.name || null,
-        subscription.status
-      ]
-    );
-  } catch (err) {
-    console.error("ERRO AO SALVAR SUBSCRIPTION:", err.message);
-  }
-}
-
-async function saveBill(bill, customerId) {
-  if (!pool) return;
-
-  try {
-    await pool.query(
-      `
-      INSERT INTO bills
-      (vindi_bill_id, customer_id, product_name, amount, status, due_at)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (vindi_bill_id)
-      DO NOTHING
-      `,
-      [
-        bill.id,
-        customerId,
-        bill.bill_items?.[0]?.product?.name || null,
-        bill.amount,
-        bill.status,
-        bill.due_at
-      ]
-    );
-  } catch (err) {
-    console.error("ERRO AO SALVAR BILL:", err.message);
-  }
+  console.log("RD STATUS:", response.status);
 }
 
 /* ===============================
@@ -160,45 +84,57 @@ app.post("/webhook/vindi", async (req, res) => {
 
     console.log("EVENTO RECEBIDO:", eventType);
 
-    if (!data?.customer?.email) {
+    const email = data?.customer?.email;
+    if (!email) {
+      console.log("EMAIL NÃO ENCONTRADO");
       return res.status(200).send("Sem email");
     }
 
-    const email = data.customer.email;
-    const productText =
-      data.subscription?.plan?.product?.name ||
-      data.bill?.bill_items?.[0]?.product?.name ||
-      "";
+    /* ===============================
+       BILL CREATED = PENDENTE
+    ================================ */
 
-    const conversionBase = resolveConversion(productText);
+    if (eventType === "bill_created") {
+      const productName =
+        data.bill?.bill_items?.[0]?.product?.name || "";
 
-    /* ================= RD ================= */
+      console.log("PRODUTO:", productName);
 
-    if (conversionBase) {
-      if (eventType === "subscription_created" || eventType === "bill_created") {
-        await sendConversionToRD(email, `${conversionBase}-pendente`);
-      }
+      const conversionBase = resolveConversion(productName);
+      console.log("BASE CONVERSÃO:", conversionBase);
 
-      if (eventType === "bill_paid") {
-        await sendConversionToRD(email, `${conversionBase}-pago`);
+      if (conversionBase) {
+        await sendConversionToRD(
+          email,
+          `${conversionBase}-pendente`
+        );
       }
     }
 
-    /* ================= BANCO (SAFE) ================= */
+    /* ===============================
+       BILL PAID = PAGO
+    ================================ */
 
-    await upsertCustomer(data.customer);
+    if (eventType === "bill_paid") {
+      const productName =
+        data.bill?.bill_items?.[0]?.product?.name || "";
 
-    if (eventType === "subscription_created" && data.subscription) {
-      await saveSubscription(data.subscription, data.customer.id);
-    }
+      console.log("PRODUTO:", productName);
 
-    if ((eventType === "bill_created" || eventType === "bill_paid") && data.bill) {
-      await saveBill(data.bill, data.customer.id);
+      const conversionBase = resolveConversion(productName);
+      console.log("BASE CONVERSÃO:", conversionBase);
+
+      if (conversionBase) {
+        await sendConversionToRD(
+          email,
+          `${conversionBase}-pago`
+        );
+      }
     }
 
     return res.status(200).send("OK");
-  } catch (err) {
-    console.error("ERRO WEBHOOK:", err.message);
+  } catch (error) {
+    console.error("ERRO WEBHOOK:", error.response?.data || error.message);
     return res.status(200).send("Erro tratado");
   }
 });
