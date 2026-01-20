@@ -11,6 +11,20 @@ app.use(express.json());
 const RD_EVENTS_URL = "https://api.rd.services/platform/events";
 
 /* ===============================
+   EXTRAÇÃO DE EMAIL (VINDI)
+================================ */
+
+function extractEmail(data) {
+  return (
+    data?.customer?.email ||
+    data?.bill?.customer?.email ||
+    data?.subscription?.customer?.email ||
+    data?.charge?.customer?.email ||
+    null
+  );
+}
+
+/* ===============================
    REGRAS DE CONVERSÃO (DE-PARA)
 ================================ */
 
@@ -45,7 +59,7 @@ function resolveConversion(text) {
 }
 
 /* ===============================
-   ENVIO DE CONVERSÃO PARA O RD
+   ENVIO DE CONVERSÃO PARA RD
 ================================ */
 
 async function sendConversionToRD(email, conversionIdentifier) {
@@ -79,6 +93,10 @@ async function sendConversionToRD(email, conversionIdentifier) {
 
 app.post("/webhook/vindi", async (req, res) => {
   try {
+    console.log("===== PAYLOAD VINDI =====");
+    console.log(JSON.stringify(req.body, null, 2));
+    console.log("========================");
+
     const eventType = req.body?.event?.type;
     const data = req.body?.event?.data;
 
@@ -86,13 +104,12 @@ app.post("/webhook/vindi", async (req, res) => {
 
     const email = extractEmail(data);
 
-if (!email) {
-  console.log("EMAIL NÃO ENCONTRADO NO PAYLOAD:", JSON.stringify(data));
-  return res.status(200).send("Sem email");
-}
+    if (!email) {
+      console.log("EMAIL NÃO ENCONTRADO NO PAYLOAD");
+      return res.status(200).send("Sem email");
+    }
 
-console.log("EMAIL ENCONTRADO:", email);
-
+    console.log("EMAIL ENCONTRADO:", email);
 
     /* ===============================
        BILL CREATED = PENDENTE
@@ -100,7 +117,7 @@ console.log("EMAIL ENCONTRADO:", email);
 
     if (eventType === "bill_created") {
       const productName =
-        data.bill?.bill_items?.[0]?.product?.name || "";
+        data?.bill?.bill_items?.[0]?.product?.name || "";
 
       console.log("PRODUTO:", productName);
 
@@ -121,7 +138,7 @@ console.log("EMAIL ENCONTRADO:", email);
 
     if (eventType === "bill_paid") {
       const productName =
-        data.bill?.bill_items?.[0]?.product?.name || "";
+        data?.bill?.bill_items?.[0]?.product?.name || "";
 
       console.log("PRODUTO:", productName);
 
