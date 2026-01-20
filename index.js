@@ -1,275 +1,214 @@
 const express = require("express");
 const axios = require("axios");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
 
-// ======================================================
-// TABELA DE REGRAS – TERMOS x CONVERSÃO
-// ======================================================
+/* ===============================
+   CONFIGURAÇÕES
+================================ */
+
+const RD_EVENTS_URL = "https://api.rd.services/platform/events";
+
+// pool do banco (não trava o webhook se cair)
+const pool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    })
+  : null;
+
+/* ===============================
+   REGRAS DE CONVERSÃO
+================================ */
 
 const CONVERSION_RULES = [
-  {
-    terms: ["ortoped", "ortopedicas"],
-    conversion: "pos-graduacao-orto"
-  },
-  {
-    terms: ["inunodeprimido", "imunodeprimido", "imunodeprimidos"],
-    conversion: "pos-graduacao-imuno"
-  },
-  {
-    terms: ["infeccao hospitalar", "ccih"],
-    conversion: "pos-graduacao-ccih"
-  },
-  {
-    terms: ["pediatria", "pediatrico", "pediatrica"],
-    conversion: "pos-graduacao-pediatria"
-  },
-  {
-    terms: ["multi-r", "multir", "multi r"],
-    conversion: "jornada-multi-r"
-  }
+  { terms: ["ortoped"], base: "pos-graduacao-orto" },
+  { terms: ["inunodeprimido", "imunodeprimido", "imunodeprimidos"], base: "pos-graduacao-imuno" },
+  { terms: ["infeccao hospitalar", "ccih"], base: "pos-graduacao-ccih" },
+  { terms: ["pediatria"], base: "pos-graduacao-pediatria" },
+  { terms: ["multi-r", "multir", "multi r"], base: "jornada-multi-r" }
 ];
 
-// ======================================================
-// OAUTH RD – ACCESS TOKEN VIA REFRESH TOKEN
-// ======================================================
-
-async function getAccessToken() {
-  const params = new URLSearchParams();
-  params.append("client_id", process.env.RD_CLIENT_ID);
-  params.append("client_secret", process.env.RD_CLIENT_SECRET);
-  params.append("refresh_token", process.env.RD_REFRESH_TOKEN);
-  params.append("grant_type", "refresh_token");
-
-  const response = await axios.post(
-    "https://api.rd.services/auth/token",
-    params.toString(),
-    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-  );
-
-  return response.data.access_token;
-}
-
-// ======================================================
-// NORMALIZA STRING (TAG / TEXTO)
-// ======================================================
-
-function normalize(value) {
-  if (!value) return null;
-
-  return value
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, "-");
-}
-
-// ======================================================
-// RESOLVE CONVERSÃO PELO TEXTO (CONTENÇÃO DE TERMOS)
-// ======================================================
-
-function resolveConversionByTerms(text) {
-  if (!text) return null;
-
-  const normalizedText = text
+function normalize(text) {
+  return text
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+}
+
+function resolveConversion(text) {
+  if (!text) return null;
+  const normalized = normalize(text);
 
   for (const rule of CONVERSION_RULES) {
     for (const term of rule.terms) {
-      if (normalizedText.includes(term)) {
-        return rule.conversion;
+      if (normalized.includes(term)) {
+        return rule.base;
       }
     }
   }
-
   return null;
 }
 
-// ======================================================
-// GARANTE CONTATO NO RD
-// ======================================================
+/* ===============================
+   RD STATION
+================================ */
 
-async function ensureContact({ email, name, accessToken }) {
-  await axios.patch(
-    `https://api.rd.services/platform/contacts/email:${email}`,
-    { name },
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-}
-
-// ======================================================
-// ADICIONA TAGS AO CONTATO
-// ======================================================
-
-async function addTags({ email, tags, accessToken }) {
+async function sendConversionToRD(email, eventIdentifier) {
   await axios.post(
-    `https://api.rd.services/platform/contacts/email:${email}/tag`,
-    { tags },
+    RD_EVENTS_URL,
+    {
+      event_type: "CONVERSION",
+      event_family: "CDP",
+      payload: {
+        conversion_identifier: eventIdentifier,
+        email
+      }
+    },
     {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${process.env.RD_API_TOKEN}`,
         "Content-Type": "application/json"
       }
     }
   );
 }
 
-// ======================================================
-// REGISTRA CONVERSÃO NO RD
-// ======================================================
+/* ===============================
+   BANCO DE DADOS (SAFE)
+================================ */
 
-async function registerConversion({ email, eventIdentifier, accessToken }) {
+async function upsertCustomer(vindiCustomer) {
+  if (!pool) return;
+
   try {
-    await axios.post(
-      "https://api.rd.services/platform/events",
-      {
-        event_type: "CONVERSION",
-        event_family: "CDP",
-        event_identifier: eventIdentifier,
-        payload: { email }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        }
-      }
+    await pool.query(
+      `
+      INSERT INTO customers (vindi_customer_id, name, email)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (vindi_customer_id)
+      DO NOTHING
+      `,
+      [vindiCustomer.id, vindiCustomer.name, vindiCustomer.email]
     );
-
-    console.log("CONVERSÃO REGISTRADA:", eventIdentifier);
-  } catch (error) {
-    console.error(
-      "ERRO AO REGISTRAR CONVERSÃO:",
-      error.response?.data || error.message
-    );
+  } catch (err) {
+    console.error("ERRO AO SALVAR CUSTOMER:", err.message);
   }
 }
 
-// ======================================================
-// WEBHOOK VINDI
-// ======================================================
+async function saveSubscription(subscription, customerId) {
+  if (!pool) return;
+
+  try {
+    await pool.query(
+      `
+      INSERT INTO subscriptions
+      (vindi_subscription_id, customer_id, product_name, plan_name, status)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (vindi_subscription_id)
+      DO NOTHING
+      `,
+      [
+        subscription.id,
+        customerId,
+        subscription.plan?.product?.name || null,
+        subscription.plan?.name || null,
+        subscription.status
+      ]
+    );
+  } catch (err) {
+    console.error("ERRO AO SALVAR SUBSCRIPTION:", err.message);
+  }
+}
+
+async function saveBill(bill, customerId) {
+  if (!pool) return;
+
+  try {
+    await pool.query(
+      `
+      INSERT INTO bills
+      (vindi_bill_id, customer_id, product_name, amount, status, due_at)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (vindi_bill_id)
+      DO NOTHING
+      `,
+      [
+        bill.id,
+        customerId,
+        bill.bill_items?.[0]?.product?.name || null,
+        bill.amount,
+        bill.status,
+        bill.due_at
+      ]
+    );
+  } catch (err) {
+    console.error("ERRO AO SALVAR BILL:", err.message);
+  }
+}
+
+/* ===============================
+   WEBHOOK VINDI
+================================ */
 
 app.post("/webhook/vindi", async (req, res) => {
-  console.log("WEBHOOK DA VINDI CHEGOU");
-  console.log(JSON.stringify(req.body));
-
   try {
-    const payload = req.body;
-    const eventType = payload?.event?.type;
+    const eventType = req.body?.event?.type;
+    const data = req.body?.event?.data;
 
-    console.log("EVENTO:", eventType);
+    console.log("EVENTO RECEBIDO:", eventType);
 
-    const accessToken = await getAccessToken();
+    if (!data?.customer?.email) {
+      return res.status(200).send("Sem email");
+    }
 
-    // ==================================================
-    // SUBSCRIPTION CREATED → CONVERSÃO PENDENTE
-    // ==================================================
-    if (eventType === "subscription_created") {
-      const subscription = payload?.event?.data?.subscription;
-      const customer = subscription?.customer;
+    const email = data.customer.email;
+    const productText =
+      data.subscription?.plan?.product?.name ||
+      data.bill?.bill_items?.[0]?.product?.name ||
+      "";
 
-      const email = customer?.email;
-      const name = customer?.name || "";
+    const conversionBase = resolveConversion(productText);
 
-      if (!email) return res.status(200).send("email ausente");
+    /* ================= RD ================= */
 
-      const rawText =
-        subscription?.plan?.name ||
-        subscription?.product?.name ||
-        "";
-
-      const conversionBase = resolveConversionByTerms(rawText);
-      const productTag = normalize(conversionBase);
-
-      await ensureContact({ email, name, accessToken });
-
-      const tags = ["assinatura-criada"];
-      if (productTag) tags.push(productTag);
-
-      await addTags({ email, tags, accessToken });
-
-      if (conversionBase) {
-        await registerConversion({
-          email,
-          eventIdentifier: `${conversionBase}-pendente`,
-          accessToken
-        });
+    if (conversionBase) {
+      if (eventType === "subscription_created" || eventType === "bill_created") {
+        await sendConversionToRD(email, `${conversionBase}-pendente`);
       }
 
-      console.log("ASSINATURA PROCESSADA");
-    }
-
-    // ==================================================
-    // BILL PAID → CONVERSÃO PAGA
-    // ==================================================
-    if (eventType === "bill_paid") {
-      const bill = payload?.event?.data?.bill;
-      const customer = bill?.customer;
-
-      const email = customer?.email;
-      const name = customer?.name || "";
-
-      if (!email) return res.status(200).send("email ausente");
-
-      const rawText =
-        bill?.bill_items?.[0]?.product?.name ||
-        "";
-
-      const conversionBase = resolveConversionByTerms(rawText);
-      const productTag = normalize(conversionBase);
-
-      await ensureContact({ email, name, accessToken });
-
-      const tags = ["cobranca-paga"];
-      if (productTag) tags.push(productTag);
-
-      await addTags({ email, tags, accessToken });
-
-      if (conversionBase) {
-        await registerConversion({
-          email,
-          eventIdentifier: `${conversionBase}-pago`,
-          accessToken
-        });
+      if (eventType === "bill_paid") {
+        await sendConversionToRD(email, `${conversionBase}-pago`);
       }
-
-      console.log("PAGAMENTO PROCESSADO");
     }
 
-    return res.status(200).send("ok");
-  } catch (error) {
-    console.error("ERRO NO WEBHOOK");
+    /* ================= BANCO (SAFE) ================= */
 
-    if (error.response) {
-      console.error("STATUS:", error.response.status);
-      console.error("DATA:", JSON.stringify(error.response.data));
-    } else {
-      console.error(error.message);
+    await upsertCustomer(data.customer);
+
+    if (eventType === "subscription_created" && data.subscription) {
+      await saveSubscription(data.subscription, data.customer.id);
     }
 
-    return res.status(200).send("erro tratado");
+    if ((eventType === "bill_created" || eventType === "bill_paid") && data.bill) {
+      await saveBill(data.bill, data.customer.id);
+    }
+
+    return res.status(200).send("OK");
+  } catch (err) {
+    console.error("ERRO WEBHOOK:", err.message);
+    return res.status(200).send("Erro tratado");
   }
 });
 
-// ======================================================
-// HEALTHCHECK
-// ======================================================
-
-app.get("/", (req, res) => {
-  res.status(200).send("online");
-});
+/* ===============================
+   START
+================================ */
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Webhook rodando");
 });
-
 
