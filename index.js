@@ -1,171 +1,199 @@
-const express = require("express");
-const axios = require("axios");
+const express = require('express');
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
 
-/* ===============================
-   CONFIGURAÇÕES
-================================ */
+const PORT = process.env.PORT || 10000;
 
-const RD_EVENTS_URL = "https://api.rd.services/platform/events";
+/* =========================================================
+   CONFIGURAÇÕES RD STATION (OAuth)
+========================================================= */
 
-/* ===============================
-   EXTRAÇÃO DE EMAIL (VINDI)
-================================ */
+let rdAccessToken = null;
+let rdTokenExpiresAt = null;
 
-function extractEmail(data) {
+async function getRdAccessToken() {
+  if (rdAccessToken && rdTokenExpiresAt > Date.now()) {
+    return rdAccessToken;
+  }
+
+  console.log('🔄 Renovando access token da RD...');
+
+  const response = await axios.post(
+    'https://api.rd.services/auth/token',
+    {
+      client_id: process.env.RD_CLIENT_ID,
+      client_secret: process.env.RD_CLIENT_SECRET,
+      refresh_token: process.env.RD_REFRESH_TOKEN,
+      grant_type: 'refresh_token'
+    }
+  );
+
+  rdAccessToken = response.data.access_token;
+  rdTokenExpiresAt = Date.now() + (response.data.expires_in - 60) * 1000;
+
+  if (response.data.refresh_token) {
+    process.env.RD_REFRESH_TOKEN = response.data.refresh_token;
+    console.log('🔁 Novo refresh token gerado — salve no Render');
+  }
+
+  return rdAccessToken;
+}
+
+/* =========================================================
+   TABELA DE MAPEAMENTO (CONTÉM TEXTO → CONVERSÃO)
+========================================================= */
+
+const conversionMap = [
+  { match: 'ortopéd', conversion: 'Pós-graduação Orto' },
+  { match: 'inunodeprimido', conversion: 'Pós-graduação Imuno' },
+  { match: 'imunodeprimido', conversion: 'Pós-graduação Imuno' },
+  { match: 'infecção hospitalar', conversion: 'Pós-graduação ccih' },
+  { match: 'ccih', conversion: 'Pós-graduação ccih' },
+  { match: 'pediatria', conversion: 'Pós-graduação Pediatria' },
+  { match: 'multi-r', conversion: 'Jornada Multi-R' }
+];
+
+function resolveConversion(productName) {
+  if (!productName) return null;
+
+  const name = productName.toLowerCase();
+
+  const found = conversionMap.find(item =>
+    name.includes(item.match)
+  );
+
+  return found ? found.conversion : null;
+}
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function extractEmail(payload) {
   return (
-    data?.customer?.email ||
-    data?.bill?.customer?.email ||
-    data?.subscription?.customer?.email ||
-    data?.charge?.customer?.email ||
+    payload?.event?.data?.customer?.email ||
+    payload?.event?.data?.bill?.customer?.email ||
+    payload?.event?.data?.subscription?.customer?.email ||
     null
   );
 }
 
-/* ===============================
-   REGRAS DE CONVERSÃO (DE-PARA)
-================================ */
-
-const CONVERSION_RULES = [
-  { terms: ["ortoped"], base: "pos-graduacao-orto" },
-  { terms: ["inunodeprimido", "imunodeprimido", "imunodeprimidos"], base: "pos-graduacao-imuno" },
-  { terms: ["infeccao hospitalar", "ccih"], base: "pos-graduacao-ccih" },
-  { terms: ["pediatria"], base: "pos-graduacao-pediatria" },
-  { terms: ["multi-r", "multir", "multi r"], base: "jornada-multi-r" }
-];
-
-function normalize(text) {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+function extractProductName(payload) {
+  return (
+    payload?.event?.data?.bill?.bill_items?.[0]?.product?.name ||
+    payload?.event?.data?.subscription?.plan?.name ||
+    null
+  );
 }
 
-function resolveConversion(text) {
-  if (!text) return null;
+async function createOrUpdateContact(email) {
+  const token = await getRdAccessToken();
 
-  const normalized = normalize(text);
-
-  for (const rule of CONVERSION_RULES) {
-    for (const term of rule.terms) {
-      if (normalized.includes(term)) {
-        return rule.base;
+  try {
+    await axios.patch(
+      `https://api.rd.services/platform/contacts/email:${email}`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
       }
+    );
+  } catch (err) {
+    if (err.response?.status === 404) {
+      await axios.post(
+        'https://api.rd.services/platform/contacts',
+        { email },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+    } else {
+      throw err;
     }
   }
-  return null;
 }
 
-/* ===============================
-   ENVIO DE CONVERSÃO PARA RD
-================================ */
+async function sendConversion(email, conversionName) {
+  const token = await getRdAccessToken();
 
-async function sendConversionToRD(email, conversionIdentifier) {
-  console.log("ENVIANDO CONVERSÃO PARA RD:", conversionIdentifier);
+  console.log(`🚀 ENVIANDO CONVERSÃO PARA RD: ${conversionName}`);
 
-  const response = await axios.post(
-    RD_EVENTS_URL,
+  await axios.post(
+    'https://api.rd.services/platform/events',
     {
-      event_type: "CONVERSION",
-      event_family: "CDP",
-      timestamp: new Date().toISOString(),
+      event_type: 'CONVERSION',
+      event_family: 'CDP',
       payload: {
-        conversion_identifier: conversionIdentifier,
-        email: email
+        conversion_identifier: conversionName.toLowerCase().replace(/\s+/g, '-'),
+        email
       }
     },
     {
       headers: {
-        Authorization: `Bearer ${process.env.RD_API_TOKEN}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
       }
     }
   );
-
-  console.log("RD STATUS:", response.status);
 }
 
-/* ===============================
+/* =========================================================
    WEBHOOK VINDI
-================================ */
+========================================================= */
 
-app.post("/webhook/vindi", async (req, res) => {
+app.post('/webhook/vindi', async (req, res) => {
   try {
-    console.log("===== PAYLOAD VINDI =====");
-    console.log(JSON.stringify(req.body, null, 2));
-    console.log("========================");
-
     const eventType = req.body?.event?.type;
-    const data = req.body?.event?.data;
+    console.log(`📩 EVENTO RECEBIDO: ${eventType}`);
 
-    console.log("EVENTO RECEBIDO:", eventType);
-
-    const email = extractEmail(data);
-
+    const email = extractEmail(req.body);
     if (!email) {
-      console.log("EMAIL NÃO ENCONTRADO NO PAYLOAD");
-      return res.status(200).send("Sem email");
+      console.log('⚠️ EMAIL NÃO ENCONTRADO — ignorando');
+      return res.sendStatus(200);
     }
 
-    console.log("EMAIL ENCONTRADO:", email);
+    const productName = extractProductName(req.body);
+    console.log('📦 PRODUTO:', productName);
 
-    /* ===============================
-       BILL CREATED = PENDENTE
-    ================================ */
-
-    if (eventType === "bill_created") {
-      const productName =
-        data?.bill?.bill_items?.[0]?.product?.name || "";
-
-      console.log("PRODUTO:", productName);
-
-      const conversionBase = resolveConversion(productName);
-      console.log("BASE CONVERSÃO:", conversionBase);
-
-      if (conversionBase) {
-        await sendConversionToRD(
-          email,
-          `${conversionBase}-pendente`
-        );
-      }
+    const baseConversion = resolveConversion(productName);
+    if (!baseConversion) {
+      console.log('⚠️ Produto sem mapeamento — ignorado');
+      return res.sendStatus(200);
     }
 
-    /* ===============================
-       BILL PAID = PAGO
-    ================================ */
+    await createOrUpdateContact(email);
 
-    if (eventType === "bill_paid") {
-      const productName =
-        data?.bill?.bill_items?.[0]?.product?.name || "";
-
-      console.log("PRODUTO:", productName);
-
-      const conversionBase = resolveConversion(productName);
-      console.log("BASE CONVERSÃO:", conversionBase);
-
-      if (conversionBase) {
-        await sendConversionToRD(
-          email,
-          `${conversionBase}-pago`
-        );
-      }
+    if (eventType === 'subscription_created' || eventType === 'bill_created') {
+      await sendConversion(email, `${baseConversion} - pendente`);
     }
 
-    return res.status(200).send("OK");
-  } catch (error) {
-    console.error("ERRO WEBHOOK:", error.response?.data || error.message);
-    return res.status(200).send("Erro tratado");
+    if (eventType === 'bill_paid') {
+      await sendConversion(email, `${baseConversion} - pago`);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('❌ ERRO WEBHOOK:', err.response?.data || err.message);
+    res.sendStatus(500);
   }
 });
 
-/* ===============================
-   START
-================================ */
+/* =========================================================
+   SERVER
+========================================================= */
 
-const PORT = process.env.PORT || 3000;
+app.get('/', (_, res) => {
+  res.send('Webhook Vindi → RD rodando');
+});
+
 app.listen(PORT, () => {
-  console.log("Webhook rodando");
+  console.log('🚀 Webhook rodando na porta', PORT);
 });
 
