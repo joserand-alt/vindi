@@ -84,11 +84,15 @@ app.post("/webhook/vindi", async (req, res) => {
 
     console.log("EVENTO RECEBIDO:", eventType);
 
-    const email = data?.customer?.email;
-    if (!email) {
-      console.log("EMAIL NÃO ENCONTRADO");
-      return res.status(200).send("Sem email");
-    }
+    const email = extractEmail(data);
+
+if (!email) {
+  console.log("EMAIL NÃO ENCONTRADO NO PAYLOAD:", JSON.stringify(data));
+  return res.status(200).send("Sem email");
+}
+
+console.log("EMAIL ENCONTRADO:", email);
+
 
     /* ===============================
        BILL CREATED = PENDENTE
