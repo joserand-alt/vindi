@@ -4,129 +4,176 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-// ==============================
-// FUNÇÕES AUXILIARES
-// ==============================
-function normalizeTag(value) {
-  if (!value) return null;
-  return value.toString().trim().toLowerCase();
-}
+// ======================================================
+// OAUTH RD – ACCESS TOKEN VIA REFRESH TOKEN
+// ======================================================
 
-async function sendToRD(email, name, tags) {
-  try {
-    // tenta buscar o contato
-    await axios.get(
-      `https://api.rd.services/platform/contacts/email:${email}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.RD_API_TOKEN}`
-        }
+async function getAccessToken() {
+  const params = new URLSearchParams();
+  params.append("client_id", process.env.RD_CLIENT_ID);
+  params.append("client_secret", process.env.RD_CLIENT_SECRET);
+  params.append("refresh_token", process.env.RD_REFRESH_TOKEN);
+  params.append("grant_type", "refresh_token");
+
+  const response = await axios.post(
+    "https://api.rd.services/auth/token",
+    params.toString(),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
       }
-    );
-
-    // contato existe → adiciona tags
-    await axios.post(
-      `https://api.rd.services/platform/contacts/email:${email}/tag`,
-      { tags },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.RD_API_TOKEN}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    console.log("RD: tags adicionadas");
-  } catch (error) {
-    if (error.response && error.response.status === 404) {
-      // contato não existe → cria
-      await axios.post(
-        "https://api.rd.services/platform/contacts",
-        {
-          email,
-          name,
-          tags
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.RD_API_TOKEN}`,
-            "Content-Type": "application/json"
-          }
-        }
-      );
-
-      console.log("RD: contato criado");
-    } else {
-      console.error(
-        "ERRO AO ENVIAR PARA RD:",
-        error.response?.data || error.message
-      );
     }
-  }
+  );
+
+  return response.data.access_token;
 }
 
-// ==============================
-// WEBHOOK DA VINDI
-// ==============================
+// ======================================================
+// FUNÇÃO AUXILIAR – GARANTIR CONTATO NO RD
+// ======================================================
+
+async function ensureContact({ email, name, accessToken }) {
+  await axios.patch(
+    `https://api.rd.services/platform/contacts/email:${email}`,
+    { name },
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
+// ======================================================
+// FUNÇÃO AUXILIAR – ADICIONAR TAGS
+// ======================================================
+
+async function addTags({ email, tags, accessToken }) {
+  await axios.post(
+    `https://api.rd.services/platform/contacts/email:${email}/tag`,
+    { tags },
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
+// ======================================================
+// WEBHOOK VINDI
+// ======================================================
+
 app.post("/webhook/vindi", async (req, res) => {
+  console.log("WEBHOOK DA VINDI CHEGOU");
+  console.log(JSON.stringify(req.body));
+
   try {
-    const eventType = req.body?.event?.type;
-    const data = req.body?.event?.data;
+    const payload = req.body;
+    const eventType = payload?.event?.type;
 
-    console.log("EVENTO RECEBIDO:", eventType);
+    const accessToken = await getAccessToken();
 
-    // eventos que vamos tratar
-    const allowedEvents = [
-      "subscription_created",
-      "bill_created",
-      "bill_paid"
-    ];
+    // ==================================================
+    // EVENTO: ASSINATURA CRIADA
+    // ==================================================
 
-    if (!allowedEvents.includes(eventType)) {
+    if (eventType === "subscription_created") {
+      const subscription = payload?.event?.data?.subscription;
+      const customer = subscription?.customer;
+
+      const email = customer?.email;
+      const name = customer?.name || "";
+
+      if (!email) {
+        return res.status(200).send("email ausente");
+      }
+
+      const productName =
+        subscription?.plan?.name ||
+        subscription?.product?.name;
+
+      const tags = ["assinatura-criada-vindi"];
+
+      if (productName) {
+        tags.push(productName.toLowerCase());
+      }
+
+      await ensureContact({ email, name, accessToken });
+      await addTags({ email, tags, accessToken });
+
+      console.log("ASSINATURA PROCESSADA");
+    }
+
+    // ==================================================
+    // EVENTO: COBRANÇA GERADA (BILL CREATED)
+    // ==================================================
+
+    if (eventType === "bill_created") {
+      const bill = payload?.event?.data?.bill;
+      const customer = bill?.customer;
+
+      const email = customer?.email;
+      const name = customer?.name || "";
+
+      if (!email) {
+        return res.status(200).send("email ausente");
+      }
+
+      const billItems = bill?.bill_items || [];
+
+      const productTags = billItems
+        .map(item => item?.product?.name)
+        .filter(Boolean)
+        .map(name => name.toLowerCase());
+
+      const tags = [
+        "cobrança gerada",
+        ...productTags
+      ];
+
+      await ensureContact({ email, name, accessToken });
+      await addTags({ email, tags, accessToken });
+
+      console.log("COBRANÇA GERADA PROCESSADA");
+    }
+
+    // ==================================================
+    // EVENTOS NÃO TRATADOS
+    // ==================================================
+
+    if (
+      eventType !== "subscription_created" &&
+      eventType !== "bill_created"
+    ) {
       console.log("EVENTO IGNORADO:", eventType);
-      return res.status(200).send("ignored");
     }
-
-    // tenta achar o customer em diferentes estruturas
-    const customer =
-      data?.subscription?.customer ||
-      data?.bill?.customer ||
-      data?.charge?.customer;
-
-    if (!customer?.email) {
-      console.log("EMAIL NÃO ENCONTRADO");
-      return res.status(200).send("no email");
-    }
-
-    const email = customer.email;
-    const name = customer.name || "";
-
-    // tenta extrair produto
-    let productName = null;
-    if (data?.bill?.bill_items?.length > 0) {
-      productName = data.bill.bill_items[0]?.product?.name || null;
-    }
-
-    const tags = [
-      normalizeTag(eventType.replace("_", "-")),
-      normalizeTag(productName)
-    ].filter(Boolean);
-
-    console.log("EMAIL:", email);
-    console.log("TAGS:", tags);
-
-    await sendToRD(email, name, tags);
 
     return res.status(200).send("ok");
-  } catch (err) {
-    console.error("ERRO NO WEBHOOK:", err.message);
-    return res.status(200).send("error treated");
+  } catch (error) {
+    console.error("ERRO NO PROCESSAMENTO");
+
+    if (error.response) {
+      console.error("STATUS:", error.response.status);
+      console.error("DATA:", JSON.stringify(error.response.data));
+    } else {
+      console.error(error.message);
+    }
+
+    return res.status(200).send("erro tratado");
   }
 });
 
-// ==============================
-// SERVER
-// ==============================
+// ======================================================
+// HEALTHCHECK
+// ======================================================
+
+app.get("/", (req, res) => {
+  res.status(200).send("online");
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Webhook rodando");
