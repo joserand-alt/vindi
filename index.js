@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 /* ===============================
-   CONFIGURAÇÕES RD STATION
+   CONFIG RD STATION
 ================================ */
 
 const RD_TOKEN_URL = "https://api.rd.services/auth/token";
@@ -40,7 +40,7 @@ async function getRdAccessToken() {
 }
 
 /* ===============================
-   DE → PARA DE CONVERSÕES
+   DE → PARA DE PRODUTOS
 ================================ */
 
 const conversionMap = [
@@ -66,11 +66,12 @@ function normalizeConversion(name) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, "-");
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 /* ===============================
-   EXTRAÇÃO DE DADOS DA VINDI
+   EXTRAÇÃO VINDI
 ================================ */
 
 function extractEmail(payload) {
@@ -82,18 +83,9 @@ function extractEmail(payload) {
   );
 }
 
-function extractName(payload) {
-  return (
-    payload?.event?.data?.customer?.name ||
-    payload?.event?.data?.bill?.customer?.name ||
-    payload?.event?.data?.subscription?.customer?.name ||
-    ""
-  );
-}
-
 function extractProductName(payload) {
   const billItems = payload?.event?.data?.bill?.bill_items;
-  if (billItems && billItems.length > 0) {
+  if (billItems?.length) {
     return billItems[0]?.product?.name || "";
   }
   return (
@@ -104,10 +96,10 @@ function extractProductName(payload) {
 }
 
 /* ===============================
-   ENVIO DE CONVERSÃO PARA RD
+   ENVIO COM RETRY PARA RD
 ================================ */
 
-async function sendConversion(email, conversionName) {
+async function sendConversionWithRetry(email, conversionName, attempts = 3) {
   const token = await getRdAccessToken();
 
   const payload = {
@@ -115,18 +107,36 @@ async function sendConversion(email, conversionName) {
     event_family: "CDP",
     payload: {
       conversion_identifier: normalizeConversion(conversionName),
-      email: email
+      email
     }
   };
 
-  console.log("➡️ Enviando conversão para RD:", payload.payload.conversion_identifier);
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      console.log(`➡️ Enviando conversão (${i}/${attempts}):`, payload.payload.conversion_identifier);
 
-  await axios.post(RD_CONVERSION_URL, payload, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
+      await axios.post(RD_CONVERSION_URL, payload, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      console.log("✅ Conversão enviada com sucesso");
+      return;
+
+    } catch (err) {
+      console.error(`❌ Falha ao enviar conversão (tentativa ${i})`,
+        err.response?.data || err.message
+      );
+
+      if (i === attempts) {
+        throw err;
+      }
+
+      await new Promise(r => setTimeout(r, 1000 * i));
     }
-  });
+  }
 }
 
 /* ===============================
@@ -142,7 +152,6 @@ app.post("/webhook/vindi", async (req, res) => {
     console.log("📌 EVENTO RECEBIDO:", eventType);
 
     const email = extractEmail(req.body);
-    const name = extractName(req.body);
     const productName = extractProductName(req.body);
 
     if (!email) {
@@ -153,24 +162,24 @@ app.post("/webhook/vindi", async (req, res) => {
     const baseConversion = resolveConversion(productName);
 
     if (eventType === "bill_created") {
-      await sendConversion(email, `${baseConversion} - pendente`);
+      await sendConversionWithRetry(email, `${baseConversion} pendente`);
     }
 
     if (eventType === "bill_paid") {
-      await sendConversion(email, `${baseConversion} - pago`);
+      await sendConversionWithRetry(email, `${baseConversion} pago`);
     }
 
     console.log("✅ Webhook processado com sucesso");
-    return res.status(200).send("ok");
+    res.status(200).send("ok");
 
   } catch (error) {
-    console.error("❌ ERRO WEBHOOK:", error.response?.data || error.message);
-    return res.status(200).send("erro tratado");
+    console.error("❌ ERRO WEBHOOK FINAL:", error.response?.data || error.message);
+    res.status(200).send("erro tratado");
   }
 });
 
 /* ===============================
-   START SERVER
+   START
 ================================ */
 
 const PORT = process.env.PORT || 3000;
