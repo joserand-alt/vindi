@@ -1,35 +1,35 @@
 const { Pool } = require("pg");
 
-/**
- * Pool único para toda a aplicação
- * NÃO criar pool dentro de função
- */
+/* =========================================================
+   POOL ÚNICO (CRIADO UMA VEZ)
+========================================================= */
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL.includes("localhost")
+  ssl: process.env.DATABASE_URL?.includes("localhost")
     ? false
-    : { rejectUnauthorized: false },
+    : { rejectUnauthorized: false }
 });
 
-/**
- * Função pública
- * NÃO usar await nela
- * NÃO lançar erro para fora
- */
-function saveEventAsync(payload) {
-  // Executa fora do fluxo principal
+/* =========================================================
+   FUNÇÃO PÚBLICA (NÃO BLOQUEANTE)
+========================================================= */
+
+function saveEventAsync(data) {
+  // executa fora do fluxo principal
   setImmediate(async () => {
     try {
-      await persistEvent(payload);
+      await persistEvent(data);
     } catch (err) {
-      console.error("🛑 ERRO AO SALVAR NO BANCO:", err.message);
+      console.error("🛑 DBWRITER | erro ao persistir evento:", err.message);
     }
   });
 }
 
-/**
- * Persistência real
- */
+/* =========================================================
+   PERSISTÊNCIA REAL
+========================================================= */
+
 async function persistEvent(data) {
   const {
     eventType,
@@ -42,11 +42,11 @@ async function persistEvent(data) {
     planName,
     amount,
     status,
-    dueAt,
+    dueAt
   } = data;
 
   if (!email) {
-    console.log("ℹ️ DB: email ausente, ignorando");
+    console.log("ℹ️ DBWRITER | email ausente, ignorando");
     return;
   }
 
@@ -55,9 +55,10 @@ async function persistEvent(data) {
   try {
     await client.query("BEGIN");
 
-    /* ==========================
+    /* ===============================
        CUSTOMER
-    ========================== */
+    =============================== */
+
     const customerResult = await client.query(
       `
       INSERT INTO customers (vindi_customer_id, name, email)
@@ -73,9 +74,10 @@ async function persistEvent(data) {
 
     const customerId = customerResult.rows[0].id;
 
-    /* ==========================
+    /* ===============================
        SUBSCRIPTION
-    ========================== */
+    =============================== */
+
     if (eventType === "subscription_created" && vindiSubscriptionId) {
       await client.query(
         `
@@ -94,14 +96,15 @@ async function persistEvent(data) {
           customerId,
           productName || null,
           planName || null,
-          status || "active",
+          status || "active"
         ]
       );
     }
 
-    /* ==========================
+    /* ===============================
        BILL
-    ========================== */
+    =============================== */
+
     if (eventType.startsWith("bill_") && vindiBillId) {
       await client.query(
         `
@@ -120,16 +123,16 @@ async function persistEvent(data) {
           vindiBillId,
           customerId,
           productName || null,
-          amount || null,
+          amount ? Number(amount) : null,
           status || null,
-          dueAt ? new Date(dueAt) : null,
+          dueAt ? new Date(dueAt) : null
         ]
       );
     }
 
     await client.query("COMMIT");
 
-    console.log("✅ DB: evento salvo com sucesso");
+    console.log("✅ DBWRITER | evento salvo com sucesso");
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -139,5 +142,6 @@ async function persistEvent(data) {
 }
 
 module.exports = {
-  saveEventAsync,
+  saveEventAsync
 };
+

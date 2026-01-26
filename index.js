@@ -1,73 +1,64 @@
 const express = require("express");
 const axios = require("axios");
-const { saveEventAsync } = require("./services/dbWriter");
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
+/* ===============================
+   CONFIGURAÇÕES RD STATION
+================================ */
 
-/* =========================================================
-   OAUTH RD STATION – REFRESH AUTOMÁTICO
-========================================================= */
+const RD_TOKEN_URL = "https://api.rd.services/auth/token";
+const RD_CONVERSION_URL = "https://api.rd.services/platform/conversions";
 
 let rdAccessToken = null;
-let rdTokenExpiresAt = null;
+let rdTokenExpiresAt = 0;
 
 async function getRdAccessToken() {
   if (rdAccessToken && rdTokenExpiresAt > Date.now()) {
     return rdAccessToken;
   }
 
-  console.log("🔄 Renovando access token da RD");
+  console.log("🔁 Renovando access token da RD...");
 
-  const response = await axios.post(
-    "https://api.rd.services/auth/token",
-    {
-      client_id: process.env.RD_CLIENT_ID,
-      client_secret: process.env.RD_CLIENT_SECRET,
-      refresh_token: process.env.RD_REFRESH_TOKEN,
-      grant_type: "refresh_token"
-    }
-  );
+  const response = await axios.post(RD_TOKEN_URL, {
+    grant_type: "refresh_token",
+    client_id: process.env.RD_CLIENT_ID,
+    client_secret: process.env.RD_CLIENT_SECRET,
+    refresh_token: process.env.RD_REFRESH_TOKEN
+  });
 
   rdAccessToken = response.data.access_token;
   rdTokenExpiresAt = Date.now() + (response.data.expires_in - 60) * 1000;
 
   if (response.data.refresh_token) {
-    process.env.RD_REFRESH_TOKEN = response.data.refresh_token;
-    console.log("🔁 Novo refresh token gerado – atualizar no Render");
+    console.warn("⚠️ Novo refresh token gerado — ATUALIZE NO RENDER");
+    console.warn(response.data.refresh_token);
   }
 
   return rdAccessToken;
 }
 
-/* =========================================================
-   TABELA DE CONVERSÕES (CONTÉM TERMO)
-========================================================= */
+/* ===============================
+   DE → PARA DE CONVERSÕES
+================================ */
 
 const conversionMap = [
   { match: "ortoped", conversion: "Pós-graduação Orto" },
   { match: "inunodeprimido", conversion: "Pós-graduação Imuno" },
-  { match: "imunodeprimido", conversion: "Pós-graduação Imuno" },
+  { match: "imunodeprimidos", conversion: "Pós-graduação Imuno" },
   { match: "infecção hospitalar", conversion: "Pós-graduação ccih" },
-  { match: "ccih", conversion: "Pós-graduação ccih" },
-  { match: "pediatriatras", conversion: "Pós-graduação Pediatria - pediatras" },
-  { match: "pediatria", conversion: "Pós-graduação Pediatria - Infecto" },
-  { match: "ped", conversion: "Pós-graduação Pediatria - Infecto" },
-  { match: "multi-r", conversion: "Jornada Multi-R" }
+  { match: "pediatria", conversion: "Pós-graduação Pediatria" },
+  { match: "multi-r", conversion: "Jornada Multi-R" },
+  { match: "ccih", conversion: "Pós-graduação ccih" }
 ];
 
-function resolveConversion(productName) {
-  if (!productName) return null;
-
+function resolveConversion(productName = "") {
   const normalized = productName.toLowerCase();
-
   const found = conversionMap.find(item =>
     normalized.includes(item.match)
   );
-
-  return found ? found.conversion : null;
+  return found ? found.conversion : "Conversão Não Mapeada";
 }
 
 function normalizeConversion(name) {
@@ -78,9 +69,9 @@ function normalizeConversion(name) {
     .replace(/\s+/g, "-");
 }
 
-/* =========================================================
-   HELPERS DE EXTRAÇÃO (VINDI)
-========================================================= */
+/* ===============================
+   EXTRAÇÃO DE DADOS DA VINDI
+================================ */
 
 function extractEmail(payload) {
   return (
@@ -91,76 +82,75 @@ function extractEmail(payload) {
   );
 }
 
-function extractProductName(payload) {
+function extractName(payload) {
   return (
-    payload?.event?.data?.bill?.bill_items?.[0]?.product?.name ||
-    payload?.event?.data?.subscription?.plan?.name ||
-    null
+    payload?.event?.data?.customer?.name ||
+    payload?.event?.data?.bill?.customer?.name ||
+    payload?.event?.data?.subscription?.customer?.name ||
+    ""
   );
 }
 
-/* =========================================================
+function extractProductName(payload) {
+  const billItems = payload?.event?.data?.bill?.bill_items;
+  if (billItems && billItems.length > 0) {
+    return billItems[0]?.product?.name || "";
+  }
+  return (
+    payload?.event?.data?.subscription?.plan?.name ||
+    payload?.event?.data?.charge?.description ||
+    ""
+  );
+}
+
+/* ===============================
    ENVIO DE CONVERSÃO PARA RD
-========================================================= */
+================================ */
 
 async function sendConversion(email, conversionName) {
   const token = await getRdAccessToken();
 
-  console.log("🚀 ENVIANDO CONVERSÃO:", conversionName);
-
-  await axios.post(
-    "https://api.rd.services/platform/events",
-    {
-      event_type: "CONVERSION",
-      event_family: "CDP",
-      timestamp: new Date().toISOString(),
-      payload: {
-        conversion_identifier: normalizeConversion(conversionName),
-        email
-      }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      }
+  const payload = {
+    event_type: "CONVERSION",
+    event_family: "CDP",
+    payload: {
+      conversion_identifier: normalizeConversion(conversionName),
+      email: email
     }
-  );
+  };
+
+  console.log("➡️ Enviando conversão para RD:", payload.payload.conversion_identifier);
+
+  await axios.post(RD_CONVERSION_URL, payload, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    }
+  });
 }
 
-/* =========================================================
+/* ===============================
    WEBHOOK VINDI
-========================================================= */
+================================ */
 
 app.post("/webhook/vindi", async (req, res) => {
   try {
-    console.log("===== PAYLOAD VINDI =====");
-    console.log(JSON.stringify(req.body, null, 2));
-    console.log("========================");
+    console.log("📩 WEBHOOK DA VINDI RECEBIDO");
+    console.log(JSON.stringify(req.body));
 
     const eventType = req.body?.event?.type;
-    console.log("📩 EVENTO:", eventType);
+    console.log("📌 EVENTO RECEBIDO:", eventType);
 
     const email = extractEmail(req.body);
-    if (!email) {
-      console.log("⚠️ EMAIL NÃO ENCONTRADO");
-      return res.sendStatus(200);
-    }
-
+    const name = extractName(req.body);
     const productName = extractProductName(req.body);
-    const baseConversion = resolveConversion(productName);
 
-    console.log("📦 PRODUTO:", productName);
-    console.log("🎯 CONVERSÃO BASE:", baseConversion);
-
-    if (!baseConversion) {
-      console.log("⚠️ Produto sem mapeamento");
-      return res.sendStatus(200);
+    if (!email) {
+      console.warn("⚠️ EMAIL NÃO ENCONTRADO — evento ignorado");
+      return res.status(200).send("email não encontrado");
     }
 
-    /* ===============================
-       CONVERSÕES RD
-    ================================ */
+    const baseConversion = resolveConversion(productName);
 
     if (eventType === "bill_created") {
       await sendConversion(email, `${baseConversion} - pendente`);
@@ -170,63 +160,20 @@ app.post("/webhook/vindi", async (req, res) => {
       await sendConversion(email, `${baseConversion} - pago`);
     }
 
-    /* ===============================
-       REGISTRO NO BANCO (SIDE EFFECT)
-    ================================ */
+    console.log("✅ Webhook processado com sucesso");
+    return res.status(200).send("ok");
 
-    saveEventAsync({
-      eventType,
-      email,
-      name:
-        req.body?.event?.data?.customer?.name ||
-        req.body?.event?.data?.bill?.customer?.name ||
-        req.body?.event?.data?.subscription?.customer?.name ||
-        null,
-
-      vindiCustomerId:
-        req.body?.event?.data?.customer?.id ||
-        req.body?.event?.data?.bill?.customer?.id ||
-        req.body?.event?.data?.subscription?.customer?.id ||
-        null,
-
-      vindiSubscriptionId:
-        req.body?.event?.data?.subscription?.id || null,
-
-      vindiBillId:
-        req.body?.event?.data?.bill?.id || null,
-
-      productName,
-
-      planName:
-        req.body?.event?.data?.subscription?.plan?.name || null,
-
-      amount:
-        req.body?.event?.data?.bill?.amount || null,
-
-      status:
-        req.body?.event?.data?.bill?.status ||
-        req.body?.event?.data?.subscription?.status ||
-        null,
-
-      dueAt:
-        req.body?.event?.data?.bill?.due_at || null
-    });
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ ERRO WEBHOOK:", err.response?.data || err.message);
-    return res.sendStatus(200);
+  } catch (error) {
+    console.error("❌ ERRO WEBHOOK:", error.response?.data || error.message);
+    return res.status(200).send("erro tratado");
   }
 });
 
-/* =========================================================
-   HEALTHCHECK
-========================================================= */
+/* ===============================
+   START SERVER
+================================ */
 
-app.get("/", (_, res) => {
-  res.send("Webhook Vindi → RD + DB rodando");
-});
-
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 Servidor rodando na porta", PORT);
+  console.log("🚀 Webhook rodando");
 });
