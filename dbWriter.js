@@ -1,14 +1,15 @@
-// dbWriter.js
 const { Pool } = require("pg");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false }, // obrigatório no Render
 });
 
-async function saveEventAsync(data) {
+async function saveEventAsync(event) {
   try {
-    await pool.query(
+    const client = await pool.connect();
+
+    await client.query(
       `
       INSERT INTO events (
         event_type,
@@ -16,25 +17,26 @@ async function saveEventAsync(data) {
         product_name,
         conversion,
         status,
-        raw_payload
+        payload
       )
       VALUES ($1, $2, $3, $4, $5, $6)
       `,
       [
-        data.eventType,
-        data.email,
-        data.productName,
-        data.conversion,
-        data.status,
-        JSON.stringify(data.payload)
+        event.eventType,
+        event.email,
+        event.productName,
+        event.conversion,
+        event.status,
+        event.payload,
       ]
     );
 
-    console.log("💾 Evento salvo no banco");
+    client.release();
+    console.log("💾 Evento salvo no banco com sucesso");
   } catch (err) {
     console.error("❌ ERRO AO SALVAR NO BANCO:", err.message);
-    // NÃO relança erro
   }
 }
 
 module.exports = { saveEventAsync };
+
