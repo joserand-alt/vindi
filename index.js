@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const { saveEventAsync } = require("./dbWriter");
 
 const app = express();
 app.use(express.json());
@@ -63,7 +64,7 @@ function resolveConversion(productName) {
 }
 
 /* =========================================================
-   HELPERS — EXTRAÇÃO REAL DA VINDI
+   HELPERS — EXTRAÇÃO VINDI
 ========================================================= */
 
 function extractEmail(payload) {
@@ -160,7 +161,6 @@ app.post("/webhook/vindi", async (req, res) => {
   try {
     const eventType = req.body?.event?.type;
     console.log("📩 EVENTO RECEBIDO:", eventType);
-    console.log("📦 PAYLOAD:", JSON.stringify(req.body));
 
     const email = extractEmail(req.body);
     if (!email) {
@@ -177,15 +177,29 @@ app.post("/webhook/vindi", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // 🔹 RD (crítico)
     await createOrUpdateContact(email);
+
+    let status = "pendente";
 
     if (eventType === "subscription_created" || eventType === "bill_created") {
       await sendConversion(email, `${baseConversion} - pendente`);
     }
 
     if (eventType === "bill_paid") {
+      status = "pago";
       await sendConversion(email, `${baseConversion} - pago`);
     }
+
+    // 🔹 BANCO (não crítico, sem await)
+    saveEventAsync({
+      eventType,
+      email,
+      productName,
+      conversion: `${baseConversion} - ${status}`,
+      status,
+      payload: req.body,
+    });
 
     console.log("✅ Webhook processado com sucesso");
     res.sendStatus(200);
@@ -206,3 +220,4 @@ app.get("/", (_, res) => {
 app.listen(PORT, () => {
   console.log("🚀 Webhook rodando na porta", PORT);
 });
+
