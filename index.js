@@ -59,7 +59,7 @@ const conversionMap = [
 function resolveConversion(productName) {
   if (!productName) return null;
   const name = productName.toLowerCase();
-  const found = conversionMap.find((item) => name.includes(item.match));
+  const found = conversionMap.find(item => name.includes(item.match));
   return found ? found.conversion : null;
 }
 
@@ -94,24 +94,14 @@ async function createOrUpdateContact(email) {
     await axios.patch(
       `https://api.rd.services/platform/contacts/email:${email}`,
       {},
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
+      { headers: { Authorization: `Bearer ${token}` } }
     );
   } catch (err) {
     if (err.response?.status === 404) {
       await axios.post(
         "https://api.rd.services/platform/contacts",
         { email },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
+        { headers: { Authorization: `Bearer ${token}` } }
       );
     } else {
       throw err;
@@ -139,17 +129,9 @@ async function sendConversion(email, conversionName) {
     {
       event_type: "CONVERSION",
       event_family: "CDP",
-      payload: {
-        conversion_identifier: identifier,
-        email,
-      },
+      payload: { conversion_identifier: identifier, email },
     },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    }
+    { headers: { Authorization: `Bearer ${token}` } }
   );
 }
 
@@ -177,28 +159,33 @@ app.post("/webhook/vindi", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 🔹 RD (crítico)
     await createOrUpdateContact(email);
 
-    let status = "pendente";
+    let status = null;
+    let conversionName = null;
 
     if (eventType === "subscription_created" || eventType === "bill_created") {
-      await sendConversion(email, `${baseConversion} - pendente`);
+      status = "pendente";
+      conversionName = `${baseConversion} - pendente`;
+      await sendConversion(email, conversionName);
     }
 
     if (eventType === "bill_paid") {
       status = "pago";
-      await sendConversion(email, `${baseConversion} - pago`);
+      conversionName = `${baseConversion} - pago`;
+      await sendConversion(email, conversionName);
     }
 
-    // 🔹 BANCO (não crítico, sem await)
+    // 🔹 SALVA NO BANCO SEM IMPACTAR A RD
     saveEventAsync({
       eventType,
       email,
       productName,
-      conversion: `${baseConversion} - ${status}`,
+      conversion: conversionName,
       status,
       payload: req.body,
+    }).catch(err => {
+      console.error("❌ ERRO AO SALVAR NO BANCO:", err.message);
     });
 
     console.log("✅ Webhook processado com sucesso");
