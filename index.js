@@ -1,14 +1,12 @@
 const express = require("express");
 const axios = require("axios");
 const { saveEventAsync } = require("./dbWriter");
+const { runProcessor } = require("./eventProcessor");
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-
-const { runProcessor } = require("./eventProcessor");
-
 
 /* =========================================================
    RD STATION — OAuth
@@ -46,7 +44,7 @@ async function getRdAccessToken() {
 }
 
 /* =========================================================
-   MAPEAMENTO DE PRODUTOS → CONVERSÕES
+   MAPEAMENTO DE PRODUTOS
 ========================================================= */
 
 const conversionMap = [
@@ -67,7 +65,7 @@ function resolveConversion(productName) {
 }
 
 /* =========================================================
-   HELPERS — EXTRAÇÃO VINDI
+   HELPERS VINDI
 ========================================================= */
 
 function extractEmail(payload) {
@@ -179,7 +177,7 @@ app.post("/webhook/vindi", async (req, res) => {
       await sendConversion(email, conversionName);
     }
 
-    // 🔹 SALVA NO BANCO SEM IMPACTAR A RD
+    // 🔹 salva evento cru no banco
     saveEventAsync({
       eventType,
       email,
@@ -187,11 +185,10 @@ app.post("/webhook/vindi", async (req, res) => {
       conversion: conversionName,
       status,
       payload: req.body,
-    }).catch(err => {
-      console.error("❌ ERRO AO SALVAR NO BANCO:", err.message);
-    });
+    }).catch(err =>
+      console.error("❌ ERRO AO SALVAR NO BANCO:", err.message)
+    );
 
-    console.log("✅ Webhook processado com sucesso");
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ ERRO WEBHOOK:", err.response?.data || err.message);
@@ -200,29 +197,14 @@ app.post("/webhook/vindi", async (req, res) => {
 });
 
 /* =========================================================
-   SERVER
+   SERVER + PROCESSOR LOOP
 ========================================================= */
 
-app.get("/", (_, res) => {
-  res.send("Webhook Vindi → RD rodando");
-});
-
-app.listen(PORT, () => {
-  console.log("🚀 Webhook rodando na porta", PORT);
-});
-
-/* =========================================================
-   EventProcessor
-========================================================= */
 let processorRunning = false;
 
-async function startEventProcessorLoop() {
+function startEventProcessorLoop() {
   setInterval(async () => {
-    if (processorRunning) {
-      console.log("⏳ Processor já em execução, pulando ciclo");
-      return;
-    }
-
+    if (processorRunning) return;
     processorRunning = true;
 
     try {
@@ -232,14 +214,15 @@ async function startEventProcessorLoop() {
     } finally {
       processorRunning = false;
     }
-  }, 60 * 1000); // roda a cada 1 minuto
+  }, 60 * 1000);
 }
-/* =========================================================
-   loop
-========================================================= */
+
+app.get("/", (_, res) => {
+  res.send("Webhook Vindi → RD rodando");
+});
+
 app.listen(PORT, () => {
   console.log("🚀 Webhook rodando na porta", PORT);
   startEventProcessorLoop();
 });
-
 
