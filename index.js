@@ -7,6 +7,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
+const { runProcessor } = require("./eventProcessor");
+
+
 /* =========================================================
    RD STATION — OAuth
 ========================================================= */
@@ -207,4 +210,36 @@ app.get("/", (_, res) => {
 app.listen(PORT, () => {
   console.log("🚀 Webhook rodando na porta", PORT);
 });
+
+/* =========================================================
+   EventProcessor
+========================================================= */
+let processorRunning = false;
+
+async function startEventProcessorLoop() {
+  setInterval(async () => {
+    if (processorRunning) {
+      console.log("⏳ Processor já em execução, pulando ciclo");
+      return;
+    }
+
+    processorRunning = true;
+
+    try {
+      await runProcessor();
+    } catch (err) {
+      console.error("❌ Erro no eventProcessor:", err.message);
+    } finally {
+      processorRunning = false;
+    }
+  }, 60 * 1000); // roda a cada 1 minuto
+}
+/* =========================================================
+   loop
+========================================================= */
+app.listen(PORT, () => {
+  console.log("🚀 Webhook rodando na porta", PORT);
+  startEventProcessorLoop();
+});
+
 
