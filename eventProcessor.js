@@ -1,178 +1,180 @@
+require("dotenv").config();
 const { Pool } = require("pg");
 
+/* =====================================================
+   CONEXÃO COM O BANCO
+===================================================== */
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  host: "dpg-d5km3n4oud1c73ds5q3g-a.virginia-postgres.render.com",
+  port: 5432,
+  user: "dbvindi_user",
+  password: "3s1nNlgBMUkLLeOK0J8ZSDlUtBzVAuON",
+  database: "dbvindi",
+  ssl: { rejectUnauthorized: false }
 });
 
-/* =========================
-   UTIL: PAID_AT
-========================= */
-function extractPaidAt(payload) {
-  const bill = payload?.event?.data?.bill;
+/* =====================================================
+   HELPERS
+===================================================== */
 
-  // prioridade absoluta
-  const chargePaidAt = bill?.charges?.[0]?.paid_at;
-  if (chargePaidAt) {
-    return new Date(chargePaidAt);
-  }
-
-  // fallback
-  if (bill?.paid_at) {
-    return new Date(bill.paid_at);
-  }
-
-  return null;
+function safeDate(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
 }
 
-/* =========================
-   PROCESSOR
-========================= */
-async function runProcessor() {
-  console.log("⚙️ Iniciando eventProcessor...");
+function extractPaidAt(payload) {
+  const bill = payload?.event?.data?.bill;
+  if (!bill) return null;
 
-  const { rows: events } = await pool.query(`
-    SELECT *
-    FROM events
-    WHERE processed IS NOT TRUE
-    ORDER BY id ASC
-    LIMIT 20
-  `);
+  // prioridade absoluta
+  const fromCharge = bill?.charges?.[0]?.paid_at;
+  if (fromCharge) return safeDate(fromCharge);
 
-  if (events.length === 0) {
-    console.log("ℹ️ Nenhum evento pendente");
-    return;
-  }
+  // fallback
+  return safeDate(bill?.paid_at);
+}
 
-  for (const event of events) {
-    try {
-      const data = event.payload?.event?.data;
-      if (!data) {
-        await pool.query(
-          `UPDATE events SET processed = TRUE WHERE id = $1`,
-          [event.id]
-        );
-        continue;
-      }
+function extractSubscriptionCreatedAt(payload) {
+  const event = payload?.event;
 
-      /* =========================
-         CUSTOMER
-      ========================= */
+  return (
+    safeDate(event?.data?.subscription?.created_at) ||
+    safeDate(event?.data?.bill?.subscription?.created_at) ||
+    safeDate(event?.created_at)
+  );
+}
 
-      const customer =
-        data.subscription?.customer ||
-        data.bill?.customer ||
-        null;
+/* =====================================================
+   PROCESSADOR PRINCIPAL
+===================================================== */
 
-      let customerId = null;
+async function runEventProcessor() {
+  console.log("⚙️ EventProcessor rodando...");
 
-      if (customer?.email) {
-        const existingCustomer = await pool.query(
-          `SELECT id FROM customers WHERE email = $1`,
-          [customer.email]
-        );
+  const client = await pool.connect();
 
-        if (existingCustomer.rows.length === 0) {
-          const insertCustomer = await pool.query(
-            `
-            INSERT INTO customers (vindi_customer_id, name, email)
-            VALUES ($1, $2, $3)
-            RETURNING id
-            `,
-            [
-              customer.id || null,
-              customer.name || null,
-              customer.email,
-            ]
+  try {
+    const { rows: events } = await client.query(`
+      SELECT *
+      FROM events
+      WHERE processed IS NOT TRUE
+      ORDER BY id
+      LIMIT 50
+    `);
+
+    if (events.length === 0) {
+      console.log("ℹ️ Nenhum evento pendente");
+      return;
+    }
+
+    for (const row of events) {
+      try {
+        const payload = row.payload;
+        const event = payload?.event;
+        const data = event?.data;
+
+        if (!data) {
+          await client.query(
+            `UPDATE events SET processed = TRUE WHERE id = $1`,
+            [row.id]
           );
-          customerId = insertCustomer.rows[0].id;
-        } else {
-          customerId = existingCustomer.rows[0].id;
-
-          await pool.query(
-            `
-            UPDATE customers
-            SET name = $1
-            WHERE id = $2
-            `,
-            [customer.name || null, customerId]
-          );
+          continue;
         }
-      }
 
-      /* =========================
-         SUBSCRIPTION
-      ========================= */
+        /* ===============================
+           CUSTOMER
+        =============================== */
 
-      if (
-        event.event_type === "subscription_created" &&
-        data.subscription
-      ) {
-        const subscriptionId = data.subscription.id;
+        const customer =
+          data.subscription?.customer ||
+          data.bill?.customer ||
+          null;
 
-        const existingSubscription = await pool.query(
-          `SELECT id FROM subscriptions WHERE vindi_subscription_id = $1`,
-          [subscriptionId]
-        );
+        let customerId = null;
 
-        if (existingSubscription.rows.length === 0) {
-          await pool.query(
+        if (customer?.email) {
+          const existingCustomer = await client.query(
+            `SELECT id FROM customers WHERE email = $1`,
+            [customer.email]
+          );
+
+          if (existingCustomer.rows.length === 0) {
+            const inserted = await client.query(
+              `
+              INSERT INTO customers (vindi_customer_id, name, email)
+              VALUES ($1,$2,$3)
+              RETURNING id
+              `,
+              [
+                customer.id || null,
+                customer.name || null,
+                customer.email
+              ]
+            );
+            customerId = inserted.rows[0].id;
+          } else {
+            customerId = existingCustomer.rows[0].id;
+
+            await client.query(
+              `UPDATE customers SET name = $1 WHERE id = $2`,
+              [customer.name || null, customerId]
+            );
+          }
+        }
+
+        /* ===============================
+           SUBSCRIPTION
+        =============================== */
+
+        if (data.subscription) {
+          const subscriptionId = data.subscription.id;
+          const createdAt = extractSubscriptionCreatedAt(payload);
+
+          await client.query(
             `
             INSERT INTO subscriptions (
               vindi_subscription_id,
               customer_id,
               product_name,
               plan_name,
-              status
+              status,
+              created_at
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1,$2,$3,$4,$5,$6)
+            ON CONFLICT (vindi_subscription_id)
+            DO UPDATE SET
+              status = EXCLUDED.status,
+              created_at = COALESCE(
+                subscriptions.created_at,
+                EXCLUDED.created_at
+              )
             `,
             [
               subscriptionId,
               customerId,
               data.subscription.plan?.name || null,
               data.subscription.plan?.name || null,
-              data.subscription.status || "active",
-            ]
-          );
-        } else {
-          await pool.query(
-            `
-            UPDATE subscriptions
-            SET status = $1
-            WHERE vindi_subscription_id = $2
-            `,
-            [
-              data.subscription.status || "active",
-              subscriptionId,
+              data.subscription.status || null,
+              createdAt
             ]
           );
         }
-      }
 
-      /* =========================
-         BILL
-      ========================= */
+        /* ===============================
+           BILL
+        =============================== */
 
-      if (
-        (event.event_type === "bill_created" ||
-          event.event_type === "bill_paid" ||
-          event.event_type === "import_bill") &&
-        data.bill
-      ) {
-        const billId = data.bill.id;
-        const paidAt = extractPaidAt(event.payload);
+        if (data.bill) {
+          const bill = data.bill;
+          const paidAt = extractPaidAt(payload);
 
-        const existingBill = await pool.query(
-          `SELECT id FROM bills WHERE vindi_bill_id = $1`,
-          [billId]
-        );
-
-        if (existingBill.rows.length === 0) {
-          await pool.query(
+          await client.query(
             `
             INSERT INTO bills (
               vindi_bill_id,
+              vindi_subscription_id,
               customer_id,
               product_name,
               amount,
@@ -181,56 +183,47 @@ async function runProcessor() {
               created_at,
               paid_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (vindi_bill_id)
+            DO UPDATE SET
+              status = EXCLUDED.status,
+              paid_at = EXCLUDED.paid_at,
+              vindi_subscription_id = COALESCE(
+                bills.vindi_subscription_id,
+                EXCLUDED.vindi_subscription_id
+              )
             `,
             [
-              billId,
+              bill.id,
+              bill.subscription?.id || null,
               customerId,
-              data.bill.bill_items?.[0]?.product?.name || null,
-              data.bill.amount ? Number(data.bill.amount) : null,
-              data.bill.status || null,
-              data.bill.due_at ? new Date(data.bill.due_at) : null,
-              data.bill.created_at
-                ? new Date(data.bill.created_at)
-                : new Date(),
-              paidAt,
-            ]
-          );
-        } else {
-          await pool.query(
-            `
-            UPDATE bills
-            SET
-              status = $1,
-              paid_at = $2
-            WHERE vindi_bill_id = $3
-            `,
-            [
-              data.bill.status || null,
-              paidAt,
-              billId,
+              bill.bill_items?.[0]?.product?.name || null,
+              bill.amount ? Number(bill.amount) : null,
+              bill.status || null,
+              safeDate(bill.due_at),
+              safeDate(bill.created_at) || new Date(),
+              paidAt
             ]
           );
         }
+
+        /* ===============================
+           FINALIZA EVENTO
+        =============================== */
+
+        await client.query(
+          `UPDATE events SET processed = TRUE WHERE id = $1`,
+          [row.id]
+        );
+
+        console.log(`✅ Evento ${row.id} processado`);
+      } catch (err) {
+        console.error(`❌ Erro no evento ${row.id}:`, err.message);
       }
-
-      /* =========================
-         MARK AS PROCESSED
-      ========================= */
-
-      await pool.query(
-        `UPDATE events SET processed = TRUE WHERE id = $1`,
-        [event.id]
-      );
-
-      console.log(`✅ Evento ${event.id} processado`);
-    } catch (err) {
-      console.error(
-        `❌ Erro ao processar evento ${event.id}:`,
-        err.message
-      );
     }
+  } finally {
+    client.release();
   }
 }
 
-module.exports = { runProcessor };
+module.exports = { runEventProcessor };
