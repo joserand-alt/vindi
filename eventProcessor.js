@@ -1,10 +1,8 @@
-
 const { Pool } = require("pg");
 
-/* =====================================================
-   CONEXÃO COM O BANCO
-===================================================== */
-
+/* ============================
+   CONEXÃO COM BANCO
+============================ */
 const pool = new Pool({
   host: "dpg-d5km3n4oud1c73ds5q3g-a.virginia-postgres.render.com",
   port: 5432,
@@ -14,10 +12,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-/* =====================================================
-   HELPERS
-===================================================== */
-
+/* ============================
+   HELPERS DE DATA
+============================ */
 function safeDate(value) {
   if (!value) return null;
   const d = new Date(value);
@@ -28,12 +25,10 @@ function extractPaidAt(payload) {
   const bill = payload?.event?.data?.bill;
   if (!bill) return null;
 
-  // prioridade absoluta
-  const fromCharge = bill?.charges?.[0]?.paid_at;
-  if (fromCharge) return safeDate(fromCharge);
-
-  // fallback
-  return safeDate(bill?.paid_at);
+  return (
+    safeDate(bill?.charges?.[0]?.paid_at) ||
+    safeDate(bill?.paid_at)
+  );
 }
 
 function extractSubscriptionCreatedAt(payload) {
@@ -46,10 +41,9 @@ function extractSubscriptionCreatedAt(payload) {
   );
 }
 
-/* =====================================================
+/* ============================
    PROCESSADOR PRINCIPAL
-===================================================== */
-
+============================ */
 async function runEventProcessor() {
   console.log("⚙️ EventProcessor rodando...");
 
@@ -83,10 +77,9 @@ async function runEventProcessor() {
           continue;
         }
 
-        /* ===============================
+        /* ============================
            CUSTOMER
-        =============================== */
-
+        ============================ */
         const customer =
           data.subscription?.customer ||
           data.bill?.customer ||
@@ -95,12 +88,12 @@ async function runEventProcessor() {
         let customerId = null;
 
         if (customer?.email) {
-          const existingCustomer = await client.query(
+          const existing = await client.query(
             `SELECT id FROM customers WHERE email = $1`,
             [customer.email]
           );
 
-          if (existingCustomer.rows.length === 0) {
+          if (existing.rows.length === 0) {
             const inserted = await client.query(
               `
               INSERT INTO customers (vindi_customer_id, name, email)
@@ -115,23 +108,14 @@ async function runEventProcessor() {
             );
             customerId = inserted.rows[0].id;
           } else {
-            customerId = existingCustomer.rows[0].id;
-
-            await client.query(
-              `UPDATE customers SET name = $1 WHERE id = $2`,
-              [customer.name || null, customerId]
-            );
+            customerId = existing.rows[0].id;
           }
         }
 
-        /* ===============================
+        /* ============================
            SUBSCRIPTION
-        =============================== */
-
+        ============================ */
         if (data.subscription) {
-          const subscriptionId = data.subscription.id;
-          const createdAt = extractSubscriptionCreatedAt(payload);
-
           await client.query(
             `
             INSERT INTO subscriptions (
@@ -152,24 +136,20 @@ async function runEventProcessor() {
               )
             `,
             [
-              subscriptionId,
+              data.subscription.id,
               customerId,
               data.subscription.plan?.name || null,
               data.subscription.plan?.name || null,
               data.subscription.status || null,
-              createdAt
+              extractSubscriptionCreatedAt(payload)
             ]
           );
         }
 
-        /* ===============================
+        /* ============================
            BILL
-        =============================== */
-
+        ============================ */
         if (data.bill) {
-          const bill = data.bill;
-          const paidAt = extractPaidAt(payload);
-
           await client.query(
             `
             INSERT INTO bills (
@@ -194,22 +174,18 @@ async function runEventProcessor() {
               )
             `,
             [
-              bill.id,
-              bill.subscription?.id || null,
+              data.bill.id,
+              data.bill.subscription?.id || null,
               customerId,
-              bill.bill_items?.[0]?.product?.name || null,
-              bill.amount ? Number(bill.amount) : null,
-              bill.status || null,
-              safeDate(bill.due_at),
-              safeDate(bill.created_at) || new Date(),
-              paidAt
+              data.bill.bill_items?.[0]?.product?.name || null,
+              data.bill.amount ? Number(data.bill.amount) : null,
+              data.bill.status || null,
+              safeDate(data.bill.due_at),
+              safeDate(data.bill.created_at) || new Date(),
+              extractPaidAt(payload)
             ]
           );
         }
-
-        /* ===============================
-           FINALIZA EVENTO
-        =============================== */
 
         await client.query(
           `UPDATE events SET processed = TRUE WHERE id = $1`,
@@ -226,4 +202,10 @@ async function runEventProcessor() {
   }
 }
 
-module.exports = { runEventProcessor };
+/* ============================
+   EXPORTS (COMPATÍVEL COM INDEX)
+============================ */
+module.exports = {
+  runEventProcessor,
+  runProcessor: runEventProcessor
+};
