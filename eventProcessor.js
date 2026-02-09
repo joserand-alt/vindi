@@ -5,6 +5,29 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+/* =========================
+   UTIL: PAID_AT
+========================= */
+function extractPaidAt(payload) {
+  const bill = payload?.event?.data?.bill;
+
+  // prioridade absoluta
+  const chargePaidAt = bill?.charges?.[0]?.paid_at;
+  if (chargePaidAt) {
+    return new Date(chargePaidAt);
+  }
+
+  // fallback
+  if (bill?.paid_at) {
+    return new Date(bill.paid_at);
+  }
+
+  return null;
+}
+
+/* =========================
+   PROCESSOR
+========================= */
 async function runProcessor() {
   console.log("⚙️ Iniciando eventProcessor...");
 
@@ -24,7 +47,13 @@ async function runProcessor() {
   for (const event of events) {
     try {
       const data = event.payload?.event?.data;
-      if (!data) continue;
+      if (!data) {
+        await pool.query(
+          `UPDATE events SET processed = TRUE WHERE id = $1`,
+          [event.id]
+        );
+        continue;
+      }
 
       /* =========================
          CUSTOMER
@@ -75,7 +104,10 @@ async function runProcessor() {
          SUBSCRIPTION
       ========================= */
 
-      if (event.event_type === "subscription_created" && data.subscription) {
+      if (
+        event.event_type === "subscription_created" &&
+        data.subscription
+      ) {
         const subscriptionId = data.subscription.id;
 
         const existingSubscription = await pool.query(
@@ -100,7 +132,7 @@ async function runProcessor() {
               customerId,
               data.subscription.plan?.name || null,
               data.subscription.plan?.name || null,
-              data.subscription.status || "ativa",
+              data.subscription.status || "active",
             ]
           );
         } else {
@@ -111,7 +143,7 @@ async function runProcessor() {
             WHERE vindi_subscription_id = $2
             `,
             [
-              data.subscription.status || "ativa",
+              data.subscription.status || "active",
               subscriptionId,
             ]
           );
@@ -124,10 +156,12 @@ async function runProcessor() {
 
       if (
         (event.event_type === "bill_created" ||
-          event.event_type === "bill_paid") &&
+          event.event_type === "bill_paid" ||
+          event.event_type === "import_bill") &&
         data.bill
       ) {
         const billId = data.bill.id;
+        const paidAt = extractPaidAt(event.payload);
 
         const existingBill = await pool.query(
           `SELECT id FROM bills WHERE vindi_bill_id = $1`,
@@ -143,33 +177,45 @@ async function runProcessor() {
               product_name,
               amount,
               status,
-              due_at
+              due_at,
+              created_at,
+              paid_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             `,
             [
               billId,
               customerId,
               data.bill.bill_items?.[0]?.product?.name || null,
-              data.bill.amount || null,
+              data.bill.amount ? Number(data.bill.amount) : null,
               data.bill.status || null,
-              data.bill.due_at || null,
+              data.bill.due_at ? new Date(data.bill.due_at) : null,
+              data.bill.created_at
+                ? new Date(data.bill.created_at)
+                : new Date(),
+              paidAt,
             ]
           );
         } else {
           await pool.query(
             `
             UPDATE bills
-            SET status = $1
-            WHERE vindi_bill_id = $2
+            SET
+              status = $1,
+              paid_at = $2
+            WHERE vindi_bill_id = $3
             `,
-            [data.bill.status || null, billId]
+            [
+              data.bill.status || null,
+              paidAt,
+              billId,
+            ]
           );
         }
       }
 
       /* =========================
-         MARK EVENT AS PROCESSED
+         MARK AS PROCESSED
       ========================= */
 
       await pool.query(
@@ -177,7 +223,7 @@ async function runProcessor() {
         [event.id]
       );
 
-      console.log(`✅ Evento ${event.id} processado com sucesso`);
+      console.log(`✅ Evento ${event.id} processado`);
     } catch (err) {
       console.error(
         `❌ Erro ao processar evento ${event.id}:`,
@@ -188,4 +234,3 @@ async function runProcessor() {
 }
 
 module.exports = { runProcessor };
-
