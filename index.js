@@ -9,64 +9,127 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 
 /* =========================================================
-   RD STATION OAuth
+   RD STATION — OAuth
 ========================================================= */
 
 let rdAccessToken = null;
 let rdTokenExpiresAt = 0;
 
-const RD_CLIENT_ID = process.env.RD_CLIENT_ID;
-const RD_CLIENT_SECRET = process.env.RD_CLIENT_SECRET;
-const RD_REFRESH_TOKEN = process.env.RD_REFRESH_TOKEN;
-
-async function getRdToken() {
-  const now = Date.now();
-
-  if (rdAccessToken && now < rdTokenExpiresAt) {
+async function getRdAccessToken() {
+  if (rdAccessToken && rdTokenExpiresAt > Date.now()) {
     return rdAccessToken;
   }
 
-  const resp = await axios.post("https://api.rd.services/auth/token", {
-    client_id: RD_CLIENT_ID,
-    client_secret: RD_CLIENT_SECRET,
-    refresh_token: RD_REFRESH_TOKEN,
-  });
+  console.log("Renovando access token da RD...");
 
-  rdAccessToken = resp.data.access_token;
-  const expiresIn = resp.data.expires_in || 900;
-  rdTokenExpiresAt = now + expiresIn * 1000;
+  const response = await axios.post(
+    "https://api.rd.services/auth/token",
+    {
+      client_id: process.env.RD_CLIENT_ID,
+      client_secret: process.env.RD_CLIENT_SECRET,
+      refresh_token: process.env.RD_REFRESH_TOKEN,
+      grant_type: "refresh_token",
+    }
+  );
+
+  rdAccessToken = response.data.access_token;
+  rdTokenExpiresAt = Date.now() + (response.data.expires_in - 60) * 1000;
+
+  if (response.data.refresh_token) {
+    console.log("Novo refresh token gerado. Atualize no ambiente (Render, etc):");
+    console.log(response.data.refresh_token);
+  }
 
   return rdAccessToken;
 }
 
 /* =========================================================
-   RD STATION Funcoes de contato e conversao
+   MAPEAMENTO DE PRODUTOS → CONVERSÃO RD
 ========================================================= */
 
-async function createOrUpdateContact(email, name) {
-  const token = await getRdToken();
+const conversionMap = [
+  { match: "ortopéd", conversion: "Pós-graduação Orto" },
+  { match: "inunodeprimido", conversion: "Pós-graduação Imuno" },
+  { match: "imunodeprimido", conversion: "Pós-graduação Imuno" },
+  { match: "infecção hospitalar", conversion: "Pós-graduação ccih" },
+  { match: "ccih", conversion: "Pós-graduação ccih" },
+  { match: "pediatria", conversion: "Pós-graduação Pediatria" },
+  { match: "multi-r", conversion: "Jornada Multi-R" },
+];
 
-  const payload = {
-    event_type: "CONTACT_UPSERT",
-    event_family: "CDP",
-    payload: {
-      email,
-    },
-  };
+function resolveConversion(productName) {
+  if (!productName) return null;
 
-  if (name) {
-    payload.payload.name = name;
-  }
+  const normalized = productName.toString().toLowerCase();
 
-  await axios.post(
-    "https://api.rd.services/platform/events",
-    payload,
-    { headers: { Authorization: `Bearer ${token}` } }
+  const found = conversionMap.find((item) =>
+    normalized.includes(item.match.toLowerCase())
+  );
+
+  return found ? found.conversion : null;
+}
+
+/* =========================================================
+   HELPERS VINDI
+========================================================= */
+
+// Vindi manda no formato: req.body.event.data.[subscription|bill]...
+function extractVindiEmail(payload) {
+  return (
+    payload?.event?.data?.subscription?.customer?.email ||
+    payload?.event?.data?.bill?.customer?.email ||
+    null
   );
 }
 
-async function sendConversion(email, identifier) {
-  const token = await getRdToken();
+function extractVindiProductName(payload) {
+  return (
+    payload?.event?.data?.bill?.bill_items?.[0]?.product?.name ||
+    payload?.event?.data?.subscription?.plan?.name ||
+    null
+  );
+}
+
+/* =========================================================
+   RD — CONTATO
+========================================================= */
+
+async function createOrUpdateContact(email) {
+  const token = await getRdAccessToken();
+
+  try {
+    await axios.patch(
+      `https://api.rd.services/platform/contacts/email:${email}`,
+      {},
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+  } catch (err) {
+    if (err.response?.status === 404) {
+      await axios.post(
+        "https://api.rd.services/platform/contacts",
+        { email },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+    } else {
+      throw err;
+    }
+  }
+}
+
+/* =========================================================
+   RD — CONVERSÃO
+========================================================= */
+
+async function sendConversion(email, conversionName) {
+  const token = await getRdAccessToken();
+
+  const identifier = conversionName
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  console.log(`Enviando conversão para RD: ${identifier}`);
 
   await axios.post(
     "https://api.rd.services/platform/events",
@@ -80,192 +143,139 @@ async function sendConversion(email, identifier) {
 }
 
 /* =========================================================
-   Mapa de conversao por produto Vindi e Kiwify
-========================================================= */
-
-const conversionMap = [
-  { match: "ortoped", conversion: "Pos graduacao Ortopedia" },
-  { match: "inunodeprimido", conversion: "Pos graduacao Imuno" },
-  { match: "imunodeprimido", conversion: "Pos graduacao Imuno" },
-  { match: "infeccao hospitalar", conversion: "Pos graduacao CCIH" },
-  { match: "ccih", conversion: "Pos graduacao CCIH" },
-  { match: "pediatria", conversion: "Pos graduacao Pediatria" },
-  { match: "multi r", conversion: "Jornada Multi R" },
-];
-
-function resolveConversion(productName) {
-  if (!productName) return null;
-
-  const normalized = productName.toString().toLowerCase();
-
-  const found = conversionMap.find((item) =>
-    normalized.includes(item.match)
-  );
-
-  return found ? found.conversion : null;
-}
-
-/* =========================================================
-   HELPERS VINDI
-========================================================= */
-
-/*
-  Ajuste estes helpers conforme o payload real da Vindi.
-  A ideia aqui e apenas unificar em email, nome do cliente e nome do plano ou produto.
-*/
-
-function extractVindiEmail(payload) {
-  return (
-    payload?.bill?.customer?.email ||
-    payload?.customer?.email ||
-    null
-  );
-}
-
-function extractVindiCustomerName(payload) {
-  return (
-    payload?.bill?.customer?.name ||
-    payload?.customer?.name ||
-    null
-  );
-}
-
-function extractVindiProductName(payload) {
-  if (payload?.bill?.product) {
-    return payload.bill.product.name;
-  }
-
-  if (Array.isArray(payload?.bill?.items) && payload.bill.items.length > 0) {
-    return payload.bill.items[0].product?.name || null;
-  }
-
-  return null;
-}
-
-function extractVindiEventType(payload) {
-  return payload?.event || payload?.type || null;
-}
-
-/* =========================================================
    WEBHOOK VINDI
 ========================================================= */
 
 app.post("/webhook/vindi", async (req, res) => {
   try {
-    const payload = req.body;
+    const eventType = req.body?.event?.type;
+    console.log("Evento Vindi recebido:", eventType);
 
-    console.log("Evento Vindi recebido", JSON.stringify(payload));
-
-    const email = extractVindiEmail(payload);
-    const name = extractVindiCustomerName(payload);
-    const productName = extractVindiProductName(payload);
-    const eventType = extractVindiEventType(payload);
-
+    const email = extractVindiEmail(req.body);
     if (!email) {
-      console.log("Email nao encontrado no payload da Vindi, ignorando");
+      console.log("Email não encontrado no payload da Vindi, evento ignorado");
       return res.sendStatus(200);
     }
+
+    const productName = extractVindiProductName(req.body);
+    console.log("Produto Vindi:", productName);
 
     const baseConversion = resolveConversion(productName);
-
     if (!baseConversion) {
-      console.log("Produto Vindi sem mapeamento de conversao, ignorando");
+      console.log("Produto Vindi sem mapeamento, evento ignorado");
       return res.sendStatus(200);
     }
 
-    await createOrUpdateContact(email, name);
+    await createOrUpdateContact(email);
 
-    let conversionName = null;
     let status = null;
+    let conversionName = null;
 
-    if (
-      eventType === "bill_created" ||
-      eventType === "bill_pending"
-    ) {
+    if (eventType === "subscription_created" || eventType === "bill_created") {
       status = "pendente";
-      conversionName = `${baseConversion} pendente`;
+      conversionName = `${baseConversion} - pendente`;
       await sendConversion(email, conversionName);
     }
 
-    if (
-      eventType === "bill_paid" ||
-      eventType === "subscription_activated"
-    ) {
+    if (eventType === "bill_paid") {
       status = "pago";
-      conversionName = `${baseConversion} pago`;
+      conversionName = `${baseConversion} - pago`;
       await sendConversion(email, conversionName);
     }
 
-    if (
-      eventType === "bill_canceled" ||
-      eventType === "bill_refunded" ||
-      eventType === "subscription_canceled"
-    ) {
-      status = "problema";
-      conversionName = `${baseConversion} problema`;
-      await sendConversion(email, conversionName);
-    }
-
+    // salva evento cru no banco
     saveEventAsync({
       source: "vindi",
       eventType,
       email,
-      name,
       productName,
+      conversion: conversionName,
       status,
-      conversionName,
-      payload,
-    }).catch((err) => {
-      console.error("Erro ao salvar evento Vindi no banco", err.message);
-    });
+      payload: req.body,
+    }).catch((err) =>
+      console.error("Erro ao salvar evento Vindi no banco:", err.message)
+    );
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Erro no webhook Vindi", err.response?.data || err.message);
+    console.error("Erro webhook Vindi:", err.response?.data || err.message);
     res.sendStatus(500);
   }
 });
 
 /* =========================================================
    HELPERS KIWIFY
+   Baseados no payload real que você enviou
 ========================================================= */
 
-const KIWIFY_WEBHOOK_SECRET = process.env.KIWIFY_WEBHOOK_SECRET || "defina_um_token_forte_aqui";
+/*
+Exemplo real que você mandou (resumido):
+
+{
+  "order_id": "...",
+  "order_status": "paid",
+  "webhook_event_type": "order_approved",
+  "Product": {
+    "product_id": "...",
+    "product_name": "Example product"
+  },
+  "Customer": {
+    "full_name": "John Doe",
+    "email": "johndoe@example.com",
+    ...
+  },
+  "event_tickets": [
+    { "name": "John Doe", "email": "johndoe@example.com", ... },
+    { "name": "Jane Doe", "email": "janedoe@example.com", ... }
+  ],
+  ...
+}
+*/
 
 function extractKiwifyEmail(payload) {
-  return (
-    payload?.buyer?.email ||
-    payload?.data?.buyer?.email ||
-    payload?.cliente?.email ||
-    null
-  );
+  if (payload?.Customer?.email) {
+    return payload.Customer.email;
+  }
+
+  if (Array.isArray(payload?.event_tickets) && payload.event_tickets.length > 0) {
+    return payload.event_tickets[0].email || null;
+  }
+
+  return null;
 }
 
-function extractKiwifyBuyerName(payload) {
-  return (
-    payload?.buyer?.name ||
-    payload?.data?.buyer?.name ||
-    payload?.cliente?.nome ||
-    null
-  );
+function extractKiwifyName(payload) {
+  if (payload?.Customer?.full_name) {
+    return payload.Customer.full_name;
+  }
+
+  if (Array.isArray(payload?.event_tickets) && payload.event_tickets.length > 0) {
+    return payload.event_tickets[0].name || null;
+  }
+
+  return null;
 }
 
 function extractKiwifyProductName(payload) {
-  return (
-    payload?.product?.name ||
-    payload?.data?.product?.name ||
-    payload?.produto?.nome ||
-    null
-  );
+  if (payload?.Product?.product_name) {
+    return payload.Product.product_name;
+  }
+
+  if (payload?.event_batch?.name) {
+    return payload.event_batch.name;
+  }
+
+  return null;
 }
 
 function extractKiwifyTrigger(payload) {
-  // boletos, pix, aprovacao, reembolso, cancelamento etc
-  return payload?.trigger || payload?.event || null;
+  // ex.: "order_approved"
+  return payload?.webhook_event_type || null;
 }
 
-function extractKiwifyToken(payload) {
-  return payload?.token || null;
+function extractKiwifyOrderStatus(payload) {
+  // ex.: "paid"
+  return payload?.order_status || null;
 }
 
 /* =========================================================
@@ -276,174 +286,105 @@ app.post("/webhook/kiwify", async (req, res) => {
   try {
     const payload = req.body;
 
-    console.log("Evento Kiwify recebido", JSON.stringify(payload));
-
-    const receivedToken = extractKiwifyToken(payload);
-    if (!receivedToken || receivedToken !== KIWIFY_WEBHOOK_SECRET) {
-      console.log("Token invalido no webhook da Kiwify");
-      return res.sendStatus(401);
-    }
+    console.log("Evento Kiwify recebido:", payload?.webhook_event_type);
 
     const email = extractKiwifyEmail(payload);
-    const name = extractKiwifyBuyerName(payload);
+    const name = extractKiwifyName(payload);
     const productName = extractKiwifyProductName(payload);
     const trigger = extractKiwifyTrigger(payload);
+    const orderStatus = extractKiwifyOrderStatus(payload);
 
     if (!email) {
-      console.log("Email nao encontrado no payload da Kiwify, ignorando");
+      console.log("Email não encontrado no payload da Kiwify, evento ignorado");
       return res.sendStatus(200);
     }
+
+    console.log("Cliente Kiwify:", email, "-", name);
+    console.log("Produto Kiwify:", productName);
+    console.log("Trigger Kiwify:", trigger);
+    console.log("Status do pedido Kiwify:", orderStatus);
 
     const baseConversion = resolveConversion(productName);
-
     if (!baseConversion) {
-      console.log("Produto Kiwify sem mapeamento de conversao, ignorando");
+      console.log("Produto Kiwify sem mapeamento, evento ignorado");
       return res.sendStatus(200);
     }
 
-    await createOrUpdateContact(email, name);
+    await createOrUpdateContact(email);
 
-    let conversionName = null;
     let status = null;
+    let conversionName = null;
 
-    if (
-      trigger === "boleto_gerado" ||
-      trigger === "pix_gerado" ||
-      trigger === "carrinho_abandonado"
-    ) {
+    // pendente / intenção
+    if (trigger === "order_created" || orderStatus === "pending") {
       status = "pendente";
-      conversionName = `${baseConversion} pendente`;
+      conversionName = `${baseConversion} - pendente`;
       await sendConversion(email, conversionName);
     }
 
-    if (
-      trigger === "compra_aprovada" ||
-      trigger === "subscription_renewed"
-    ) {
+    // pago / aprovado
+    if (trigger === "order_approved" || orderStatus === "paid") {
       status = "pago";
-      conversionName = `${baseConversion} pago`;
+      conversionName = `${baseConversion} - pago`;
       await sendConversion(email, conversionName);
     }
 
-    if (
-      trigger === "compra_recusada" ||
-      trigger === "compra_reembolsada" ||
-      trigger === "chargeback" ||
-      trigger === "subscription_canceled" ||
-      trigger === "subscription_late"
-    ) {
-      status = "problema";
-      conversionName = `${baseConversion} problema`;
+    // reembolsado (se você quiser marcar na RD)
+    if (trigger === "order_refunded" || orderStatus === "refunded") {
+      status = "reembolsado";
+      conversionName = `${baseConversion} - reembolsado`;
       await sendConversion(email, conversionName);
     }
 
+    // salva evento cru no banco
     saveEventAsync({
       source: "kiwify",
       trigger,
+      orderStatus,
       email,
       name,
       productName,
       status,
-      conversionName,
+      conversion: conversionName,
       payload,
     }).catch((err) => {
-      console.error("Erro ao salvar evento Kiwify no banco", err.message);
+      console.error("Erro ao salvar evento Kiwify no banco:", err.message);
     });
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Erro no webhook Kiwify", err.response?.data || err.message);
+    console.error("Erro webhook Kiwify:", err.response?.data || err.message);
     res.sendStatus(500);
   }
 });
 
 /* =========================================================
-   REGISTRO DO WEBHOOK NA KIWIFY
-========================================================= */
-
-const KIWIFY_API_URL = process.env.KIWIFY_API_URL || "https://api.kiwify.com.br";
-const KIWIFY_ACCOUNT_ID = process.env.KIWIFY_ACCOUNT_ID;
-const KIWIFY_ACCESS_TOKEN = process.env.KIWIFY_ACCESS_TOKEN;
-const KIWIFY_WEBHOOK_URL = process.env.KIWIFY_WEBHOOK_URL || "https://seu_dominio.com/webhook/kiwify";
-
-async function registerKiwifyWebhook() {
-  try {
-    if (!KIWIFY_ACCOUNT_ID || !KIWIFY_ACCESS_TOKEN) {
-      console.log("Variaveis Kiwify nao configuradas, sem registro automatico do webhook");
-      return;
-    }
-
-    const body = {
-      name: "Webhook InfectoCast para RD Station",
-      url: KIWIFY_WEBHOOK_URL,
-      products: "all",
-      triggers: [
-        "boleto_gerado",
-        "pix_gerado",
-        "carrinho_abandonado",
-        "compra_recusada",
-        "compra_aprovada",
-        "compra_reembolsada",
-        "chargeback",
-        "subscription_canceled",
-        "subscription_late",
-        "subscription_renewed",
-      ],
-      token: KIWIFY_WEBHOOK_SECRET,
-    };
-
-    const resp = await axios.post(
-      `${KIWIFY_API_URL}/webhooks`,
-      body,
-      {
-        headers: {
-          "x-kiwify-account-id": KIWIFY_ACCOUNT_ID,
-          Authorization: `Bearer ${KIWIFY_ACCESS_TOKEN}`,
-        },
-      }
-    );
-
-    console.log("Webhook Kiwify registrado com sucesso", resp.data);
-  } catch (err) {
-    console.error("Erro ao registrar webhook na Kiwify", err.response?.data || err.message);
-  }
-}
-
-app.post("/kiwify/register-webhook", async (_, res) => {
-  await registerKiwifyWebhook();
-  res.send("Registro de webhook Kiwify disparado, veja os logs do servidor para o resultado");
-});
-
-/* =========================================================
-   LOOP DO PROCESSADOR
+   SERVER + PROCESSOR LOOP
 ========================================================= */
 
 let processorRunning = false;
 
 function startEventProcessorLoop() {
-  if (processorRunning) return;
-  processorRunning = true;
-
   setInterval(async () => {
+    if (processorRunning) return;
+    processorRunning = true;
+
     try {
       await runProcessor();
     } catch (err) {
-      console.error("Erro no processador de eventos", err.message);
+      console.error("Erro no processador de eventos:", err.message);
+    } finally {
+      processorRunning = false;
     }
   }, 60 * 1000);
 }
 
-/* =========================================================
-   SERVER
-========================================================= */
-
 app.get("/", (_, res) => {
-  res.send("Webhook Vindi e Kiwify para RD rodando");
+  res.send("Webhook Vindi e Kiwify → RD rodando");
 });
 
 app.listen(PORT, () => {
   console.log("Webhook rodando na porta", PORT);
   startEventProcessorLoop();
-  // se quiser registrar automaticamente na subida, descomente a linha abaixo uma vez e depois comente de novo
-  // registerKiwifyWebhook();
 });
+
