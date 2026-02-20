@@ -9,7 +9,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 
 /* =========================================================
-   RD STATION — OAuth
+   RD STATION OAuth
 ========================================================= */
 
 let rdAccessToken = null;
@@ -20,7 +20,7 @@ async function getRdAccessToken() {
     return rdAccessToken;
   }
 
-  console.log("Renovando access token da RD...");
+  console.log("Renovando access token da RD");
 
   const response = await axios.post(
     "https://api.rd.services/auth/token",
@@ -36,7 +36,7 @@ async function getRdAccessToken() {
   rdTokenExpiresAt = Date.now() + (response.data.expires_in - 60) * 1000;
 
   if (response.data.refresh_token) {
-    console.log("Novo refresh token gerado. Atualize no ambiente:");
+    console.log("Novo refresh token gerado, atualize no ambiente");
     console.log(response.data.refresh_token);
   }
 
@@ -44,17 +44,17 @@ async function getRdAccessToken() {
 }
 
 /* =========================================================
-   MAPEAMENTO DE PRODUTOS → CONVERSÃO RD
+   MAPEAMENTO DE PRODUTOS PARA CONVERSAO RD
 ========================================================= */
 
 const conversionMap = [
-  { match: "ortopéd", conversion: "Pós-graduação Orto" },
-  { match: "inunodeprimido", conversion: "Pós-graduação Imuno" },
-  { match: "imunodeprimido", conversion: "Pós-graduação Imuno" },
-  { match: "infecção hospitalar", conversion: "Pós-graduação ccih" },
-  { match: "ccih", conversion: "Pós-graduação ccih" },
-  { match: "pediatria", conversion: "Pós-graduação Pediatria" },
-  { match: "multi-r", conversion: "Jornada Multi-R" },
+  { match: "ortopéd", conversion: "Pós graduação Orto" },
+  { match: "inunodeprimido", conversion: "Pós graduação Imuno" },
+  { match: "imunodeprimido", conversion: "Pós graduação Imuno" },
+  { match: "infecção hospitalar", conversion: "Pós graduação ccih" },
+  { match: "ccih", conversion: "Pós graduação ccih" },
+  { match: "pediatria", conversion: "Pós graduação Pediatria" },
+  { match: "multi r", conversion: "Jornada Multi R" },
 ];
 
 function resolveConversion(productName) {
@@ -70,7 +70,7 @@ function resolveConversion(productName) {
 }
 
 /* =========================================================
-   RD — CONTATO E CONVERSÃO
+   RD CONTATO E CONVERSAO
 ========================================================= */
 
 async function createOrUpdateContact(email, name) {
@@ -107,7 +107,7 @@ async function sendConversion(email, conversionName) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
 
-  console.log(`Enviando conversão para RD: ${identifier}`);
+  console.log(`Enviando conversao para RD ${identifier}`);
 
   await axios.post(
     "https://api.rd.services/platform/events",
@@ -122,10 +122,8 @@ async function sendConversion(email, conversionName) {
 
 /* =========================================================
    HELPERS VINDI
-   (genéricos, para tentar primeiro)
 ========================================================= */
 
-// aqui eu considero alguns formatos comuns de payload da Vindi
 function extractVindiEmail(payload) {
   return (
     payload?.event?.data?.subscription?.customer?.email ||
@@ -171,22 +169,6 @@ function extractVindiEventType(payload) {
    Baseados no payload real que você enviou
 ========================================================= */
 
-/*
-Exemplo real (resumido):
-
-{
-  "order_id": "...",
-  "order_status": "paid",
-  "webhook_event_type": "order_approved",
-  "Product": { "product_name": "Example product" },
-  "Customer": { "full_name": "John Doe", "email": "johndoe@example.com" },
-  "event_tickets": [
-    { "name": "John Doe", "email": "johndoe@example.com" },
-    { "name": "Jane Doe", "email": "janedoe@example.com" }
-  ]
-}
-*/
-
 function extractKiwifyEmail(payload) {
   if (payload?.Customer?.email) {
     return payload.Customer.email;
@@ -224,39 +206,37 @@ function extractKiwifyProductName(payload) {
 }
 
 function extractKiwifyTrigger(payload) {
-  // ex.: "order_approved"
   return payload?.webhook_event_type || null;
 }
 
 function extractKiwifyOrderStatus(payload) {
-  // ex.: "paid"
   return payload?.order_status || null;
 }
 
 /* =========================================================
-   PROCESSADORES ESPECÍFICOS
+   PROCESSADORES ESPECIFICOS
 ========================================================= */
 
 async function processVindiEvent(payload) {
   const eventType = extractVindiEventType(payload);
-  console.log("Evento identificado como Vindi:", eventType);
+  console.log("Evento identificado como Vindi", eventType);
 
   const email = extractVindiEmail(payload);
   const name = extractVindiName(payload);
   const productName = extractVindiProductName(payload);
 
   if (!email) {
-    console.log("Email não encontrado no payload da Vindi, não deveria cair aqui");
+    console.log("Email nao encontrado no payload Vindi dentro do processador");
     return;
   }
 
-  console.log("Cliente Vindi:", email, "-", name);
-  console.log("Produto Vindi:", productName);
+  console.log("Cliente Vindi", email, name);
+  console.log("Produto Vindi", productName);
 
-  const baseConversion = resolveConversion(productName);
+  let baseConversion = resolveConversion(productName);
   if (!baseConversion) {
-    console.log("Produto Vindi sem mapeamento, evento ignorado");
-    return;
+    baseConversion = productName || "Produto Vindi";
+    console.log("Produto Vindi sem mapeamento, usando nome do produto como conversao", baseConversion);
   }
 
   await createOrUpdateContact(email, name);
@@ -266,13 +246,13 @@ async function processVindiEvent(payload) {
 
   if (eventType === "subscription_created" || eventType === "bill_created") {
     status = "pendente";
-    conversionName = `${baseConversion} - pendente`;
+    conversionName = `${baseConversion} pendente`;
     await sendConversion(email, conversionName);
   }
 
   if (eventType === "bill_paid" || eventType === "subscription_activated") {
     status = "pago";
-    conversionName = `${baseConversion} - pago`;
+    conversionName = `${baseConversion} pago`;
     await sendConversion(email, conversionName);
   }
 
@@ -282,7 +262,7 @@ async function processVindiEvent(payload) {
     eventType === "subscription_canceled"
   ) {
     status = "problema";
-    conversionName = `${baseConversion} - problema`;
+    conversionName = `${baseConversion} problema`;
     await sendConversion(email, conversionName);
   }
 
@@ -296,31 +276,31 @@ async function processVindiEvent(payload) {
     conversion: conversionName,
     payload,
   }).catch((err) => {
-    console.error("Erro ao salvar evento Vindi no banco:", err.message);
+    console.error("Erro ao salvar evento Vindi no banco", err.message);
   });
 }
 
 async function processKiwifyEvent(payload) {
   const trigger = extractKiwifyTrigger(payload);
   const orderStatus = extractKiwifyOrderStatus(payload);
-  console.log("Evento identificado como Kiwify:", trigger, orderStatus);
+  console.log("Evento identificado como Kiwify", trigger, orderStatus);
 
   const email = extractKiwifyEmail(payload);
   const name = extractKiwifyName(payload);
   const productName = extractKiwifyProductName(payload);
 
   if (!email) {
-    console.log("Email não encontrado no payload da Kiwify, não deveria cair aqui");
+    console.log("Email nao encontrado no payload Kiwify dentro do processador");
     return;
   }
 
-  console.log("Cliente Kiwify:", email, "-", name);
-  console.log("Produto Kiwify:", productName);
+  console.log("Cliente Kiwify", email, name);
+  console.log("Produto Kiwify", productName);
 
-  const baseConversion = resolveConversion(productName);
+  let baseConversion = resolveConversion(productName);
   if (!baseConversion) {
-    console.log("Produto Kiwify sem mapeamento, evento ignorado");
-    return;
+    baseConversion = productName || "Produto Kiwify";
+    console.log("Produto Kiwify sem mapeamento, usando nome do produto como conversao", baseConversion);
   }
 
   await createOrUpdateContact(email, name);
@@ -330,19 +310,19 @@ async function processKiwifyEvent(payload) {
 
   if (trigger === "order_created" || orderStatus === "pending") {
     status = "pendente";
-    conversionName = `${baseConversion} - pendente`;
+    conversionName = `${baseConversion} pendente`;
     await sendConversion(email, conversionName);
   }
 
   if (trigger === "order_approved" || orderStatus === "paid") {
     status = "pago";
-    conversionName = `${baseConversion} - pago`;
+    conversionName = `${baseConversion} pago`;
     await sendConversion(email, conversionName);
   }
 
   if (trigger === "order_refunded" || orderStatus === "refunded") {
     status = "reembolsado";
-    conversionName = `${baseConversion} - reembolsado`;
+    conversionName = `${baseConversion} reembolsado`;
     await sendConversion(email, conversionName);
   }
 
@@ -357,19 +337,19 @@ async function processKiwifyEvent(payload) {
     conversion: conversionName,
     payload,
   }).catch((err) => {
-    console.error("Erro ao salvar evento Kiwify no banco:", err.message);
+    console.error("Erro ao salvar evento Kiwify no banco", err.message);
   });
 }
 
 /* =========================================================
-   ENDPOINT ÚNICO — VINDI PRIMEIRO, KIWIFY DEPOIS
+   ENDPOINT UNICO VINDI PRIMEIRO KIWIFY DEPOIS
 ========================================================= */
 
 app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
 
-    console.log("Webhook recebido:", JSON.stringify(payload));
+    console.log("Webhook recebido", JSON.stringify(payload));
 
     const vindiEmail = extractVindiEmail(payload);
 
@@ -385,16 +365,16 @@ app.post("/webhook/vindi", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    console.log("Email não encontrado nem como Vindi nem como Kiwify, evento ignorado");
+    console.log("Email nao encontrado nem como Vindi nem como Kiwify, evento ignorado");
     res.sendStatus(200);
   } catch (err) {
-    console.error("Erro no endpoint unificado:", err.response?.data || err.message);
+    console.error("Erro no endpoint unificado", err.response?.data || err.message);
     res.sendStatus(500);
   }
 });
 
 /* =========================================================
-   SERVER + PROCESSOR LOOP
+   SERVER E LOOP DO PROCESSADOR
 ========================================================= */
 
 let processorRunning = false;
@@ -407,7 +387,7 @@ function startEventProcessorLoop() {
     try {
       await runProcessor();
     } catch (err) {
-      console.error("Erro no processador de eventos:", err.message);
+      console.error("Erro no processador de eventos", err.message);
     } finally {
       processorRunning = false;
     }
@@ -415,7 +395,7 @@ function startEventProcessorLoop() {
 }
 
 app.get("/", (_, res) => {
-  res.send("Webhook unificado Vindi + Kiwify → RD rodando");
+  res.send("Webhook unificado Vindi e Kiwify para RD rodando");
 });
 
 app.listen(PORT, () => {
