@@ -166,7 +166,6 @@ function extractVindiEventType(payload) {
 
 /* =========================================================
    HELPERS KIWIFY
-   Baseados no payload real que você enviou
 ========================================================= */
 
 function extractKiwifyEmail(payload) {
@@ -268,7 +267,7 @@ async function processVindiEvent(payload) {
 
   await saveEventAsync({
     source: "vindi",
-    eventType,
+    eventType,              // aqui preenche eventType para o banco
     email,
     name,
     productName,
@@ -328,6 +327,7 @@ async function processKiwifyEvent(payload) {
 
   await saveEventAsync({
     source: "kiwify",
+    eventType: trigger || orderStatus || "kiwify_event",  // linha chave para corrigir o erro
     trigger,
     orderStatus,
     email,
