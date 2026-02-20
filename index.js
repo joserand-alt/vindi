@@ -36,7 +36,7 @@ async function getRdAccessToken() {
   rdTokenExpiresAt = Date.now() + (response.data.expires_in - 60) * 1000;
 
   if (response.data.refresh_token) {
-    console.log("Novo refresh token gerado. Atualize no ambiente (Render, etc):");
+    console.log("Novo refresh token gerado. Atualize no ambiente:");
     console.log(response.data.refresh_token);
   }
 
@@ -70,44 +70,26 @@ function resolveConversion(productName) {
 }
 
 /* =========================================================
-   HELPERS VINDI
+   RD — CONTATO E CONVERSÃO
 ========================================================= */
 
-// Vindi manda no formato: req.body.event.data.[subscription|bill]...
-function extractVindiEmail(payload) {
-  return (
-    payload?.event?.data?.subscription?.customer?.email ||
-    payload?.event?.data?.bill?.customer?.email ||
-    null
-  );
-}
-
-function extractVindiProductName(payload) {
-  return (
-    payload?.event?.data?.bill?.bill_items?.[0]?.product?.name ||
-    payload?.event?.data?.subscription?.plan?.name ||
-    null
-  );
-}
-
-/* =========================================================
-   RD — CONTATO
-========================================================= */
-
-async function createOrUpdateContact(email) {
+async function createOrUpdateContact(email, name) {
   const token = await getRdAccessToken();
 
   try {
+    const payload = {};
+    if (name) payload.name = name;
+
     await axios.patch(
       `https://api.rd.services/platform/contacts/email:${email}`,
-      {},
+      payload,
       { headers: { Authorization: `Bearer ${token}` } }
     );
   } catch (err) {
     if (err.response?.status === 404) {
       await axios.post(
         "https://api.rd.services/platform/contacts",
-        { email },
+        { email, name },
         { headers: { Authorization: `Bearer ${token}` } }
       );
     } else {
@@ -115,10 +97,6 @@ async function createOrUpdateContact(email) {
     }
   }
 }
-
-/* =========================================================
-   RD — CONVERSÃO
-========================================================= */
 
 async function sendConversion(email, conversionName) {
   const token = await getRdAccessToken();
@@ -143,65 +121,50 @@ async function sendConversion(email, conversionName) {
 }
 
 /* =========================================================
-   WEBHOOK VINDI
+   HELPERS VINDI
+   (genéricos, para tentar primeiro)
 ========================================================= */
 
-app.post("/webhook/vindi", async (req, res) => {
-  try {
-    const eventType = req.body?.event?.type;
-    console.log("Evento Vindi recebido:", eventType);
+// aqui eu considero alguns formatos comuns de payload da Vindi
+function extractVindiEmail(payload) {
+  return (
+    payload?.event?.data?.subscription?.customer?.email ||
+    payload?.event?.data?.bill?.customer?.email ||
+    payload?.bill?.customer?.email ||
+    payload?.customer?.email ||
+    null
+  );
+}
 
-    const email = extractVindiEmail(req.body);
-    if (!email) {
-      console.log("Email não encontrado no payload da Vindi, evento ignorado");
-      return res.sendStatus(200);
-    }
+function extractVindiName(payload) {
+  return (
+    payload?.event?.data?.subscription?.customer?.name ||
+    payload?.event?.data?.bill?.customer?.name ||
+    payload?.bill?.customer?.name ||
+    payload?.customer?.name ||
+    null
+  );
+}
 
-    const productName = extractVindiProductName(req.body);
-    console.log("Produto Vindi:", productName);
-
-    const baseConversion = resolveConversion(productName);
-    if (!baseConversion) {
-      console.log("Produto Vindi sem mapeamento, evento ignorado");
-      return res.sendStatus(200);
-    }
-
-    await createOrUpdateContact(email);
-
-    let status = null;
-    let conversionName = null;
-
-    if (eventType === "subscription_created" || eventType === "bill_created") {
-      status = "pendente";
-      conversionName = `${baseConversion} - pendente`;
-      await sendConversion(email, conversionName);
-    }
-
-    if (eventType === "bill_paid") {
-      status = "pago";
-      conversionName = `${baseConversion} - pago`;
-      await sendConversion(email, conversionName);
-    }
-
-    // salva evento cru no banco
-    saveEventAsync({
-      source: "vindi",
-      eventType,
-      email,
-      productName,
-      conversion: conversionName,
-      status,
-      payload: req.body,
-    }).catch((err) =>
-      console.error("Erro ao salvar evento Vindi no banco:", err.message)
-    );
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Erro webhook Vindi:", err.response?.data || err.message);
-    res.sendStatus(500);
+function extractVindiProductName(payload) {
+  if (payload?.event?.data?.bill?.bill_items?.[0]?.product?.name) {
+    return payload.event.data.bill.bill_items[0].product.name;
   }
-});
+
+  if (payload?.event?.data?.subscription?.plan?.name) {
+    return payload.event.data.subscription.plan.name;
+  }
+
+  if (Array.isArray(payload?.bill?.bill_items) && payload.bill.bill_items.length > 0) {
+    return payload.bill.bill_items[0].product?.name || null;
+  }
+
+  return null;
+}
+
+function extractVindiEventType(payload) {
+  return payload?.event?.type || payload?.type || null;
+}
 
 /* =========================================================
    HELPERS KIWIFY
@@ -209,26 +172,18 @@ app.post("/webhook/vindi", async (req, res) => {
 ========================================================= */
 
 /*
-Exemplo real que você mandou (resumido):
+Exemplo real (resumido):
 
 {
   "order_id": "...",
   "order_status": "paid",
   "webhook_event_type": "order_approved",
-  "Product": {
-    "product_id": "...",
-    "product_name": "Example product"
-  },
-  "Customer": {
-    "full_name": "John Doe",
-    "email": "johndoe@example.com",
-    ...
-  },
+  "Product": { "product_name": "Example product" },
+  "Customer": { "full_name": "John Doe", "email": "johndoe@example.com" },
   "event_tickets": [
-    { "name": "John Doe", "email": "johndoe@example.com", ... },
-    { "name": "Jane Doe", "email": "janedoe@example.com", ... }
-  ],
-  ...
+    { "name": "John Doe", "email": "johndoe@example.com" },
+    { "name": "Jane Doe", "email": "janedoe@example.com" }
+  ]
 }
 */
 
@@ -279,81 +234,161 @@ function extractKiwifyOrderStatus(payload) {
 }
 
 /* =========================================================
-   WEBHOOK KIWIFY
+   PROCESSADORES ESPECÍFICOS
 ========================================================= */
 
-app.post("/webhook/kiwify", async (req, res) => {
+async function processVindiEvent(payload) {
+  const eventType = extractVindiEventType(payload);
+  console.log("Evento identificado como Vindi:", eventType);
+
+  const email = extractVindiEmail(payload);
+  const name = extractVindiName(payload);
+  const productName = extractVindiProductName(payload);
+
+  if (!email) {
+    console.log("Email não encontrado no payload da Vindi, não deveria cair aqui");
+    return;
+  }
+
+  console.log("Cliente Vindi:", email, "-", name);
+  console.log("Produto Vindi:", productName);
+
+  const baseConversion = resolveConversion(productName);
+  if (!baseConversion) {
+    console.log("Produto Vindi sem mapeamento, evento ignorado");
+    return;
+  }
+
+  await createOrUpdateContact(email, name);
+
+  let status = null;
+  let conversionName = null;
+
+  if (eventType === "subscription_created" || eventType === "bill_created") {
+    status = "pendente";
+    conversionName = `${baseConversion} - pendente`;
+    await sendConversion(email, conversionName);
+  }
+
+  if (eventType === "bill_paid" || eventType === "subscription_activated") {
+    status = "pago";
+    conversionName = `${baseConversion} - pago`;
+    await sendConversion(email, conversionName);
+  }
+
+  if (
+    eventType === "bill_canceled" ||
+    eventType === "bill_refunded" ||
+    eventType === "subscription_canceled"
+  ) {
+    status = "problema";
+    conversionName = `${baseConversion} - problema`;
+    await sendConversion(email, conversionName);
+  }
+
+  await saveEventAsync({
+    source: "vindi",
+    eventType,
+    email,
+    name,
+    productName,
+    status,
+    conversion: conversionName,
+    payload,
+  }).catch((err) => {
+    console.error("Erro ao salvar evento Vindi no banco:", err.message);
+  });
+}
+
+async function processKiwifyEvent(payload) {
+  const trigger = extractKiwifyTrigger(payload);
+  const orderStatus = extractKiwifyOrderStatus(payload);
+  console.log("Evento identificado como Kiwify:", trigger, orderStatus);
+
+  const email = extractKiwifyEmail(payload);
+  const name = extractKiwifyName(payload);
+  const productName = extractKiwifyProductName(payload);
+
+  if (!email) {
+    console.log("Email não encontrado no payload da Kiwify, não deveria cair aqui");
+    return;
+  }
+
+  console.log("Cliente Kiwify:", email, "-", name);
+  console.log("Produto Kiwify:", productName);
+
+  const baseConversion = resolveConversion(productName);
+  if (!baseConversion) {
+    console.log("Produto Kiwify sem mapeamento, evento ignorado");
+    return;
+  }
+
+  await createOrUpdateContact(email, name);
+
+  let status = null;
+  let conversionName = null;
+
+  if (trigger === "order_created" || orderStatus === "pending") {
+    status = "pendente";
+    conversionName = `${baseConversion} - pendente`;
+    await sendConversion(email, conversionName);
+  }
+
+  if (trigger === "order_approved" || orderStatus === "paid") {
+    status = "pago";
+    conversionName = `${baseConversion} - pago`;
+    await sendConversion(email, conversionName);
+  }
+
+  if (trigger === "order_refunded" || orderStatus === "refunded") {
+    status = "reembolsado";
+    conversionName = `${baseConversion} - reembolsado`;
+    await sendConversion(email, conversionName);
+  }
+
+  await saveEventAsync({
+    source: "kiwify",
+    trigger,
+    orderStatus,
+    email,
+    name,
+    productName,
+    status,
+    conversion: conversionName,
+    payload,
+  }).catch((err) => {
+    console.error("Erro ao salvar evento Kiwify no banco:", err.message);
+  });
+}
+
+/* =========================================================
+   ENDPOINT ÚNICO — VINDI PRIMEIRO, KIWIFY DEPOIS
+========================================================= */
+
+app.post("/webhook/vindi", async (req, res) => {
   try {
     const payload = req.body;
 
-    console.log("Evento Kiwify recebido:", payload?.webhook_event_type);
+    console.log("Webhook recebido:", JSON.stringify(payload));
 
-    const email = extractKiwifyEmail(payload);
-    const name = extractKiwifyName(payload);
-    const productName = extractKiwifyProductName(payload);
-    const trigger = extractKiwifyTrigger(payload);
-    const orderStatus = extractKiwifyOrderStatus(payload);
+    const vindiEmail = extractVindiEmail(payload);
 
-    if (!email) {
-      console.log("Email não encontrado no payload da Kiwify, evento ignorado");
+    if (vindiEmail) {
+      await processVindiEvent(payload);
       return res.sendStatus(200);
     }
 
-    console.log("Cliente Kiwify:", email, "-", name);
-    console.log("Produto Kiwify:", productName);
-    console.log("Trigger Kiwify:", trigger);
-    console.log("Status do pedido Kiwify:", orderStatus);
+    const kiwifyEmail = extractKiwifyEmail(payload);
 
-    const baseConversion = resolveConversion(productName);
-    if (!baseConversion) {
-      console.log("Produto Kiwify sem mapeamento, evento ignorado");
+    if (kiwifyEmail) {
+      await processKiwifyEvent(payload);
       return res.sendStatus(200);
     }
 
-    await createOrUpdateContact(email);
-
-    let status = null;
-    let conversionName = null;
-
-    // pendente / intenção
-    if (trigger === "order_created" || orderStatus === "pending") {
-      status = "pendente";
-      conversionName = `${baseConversion} - pendente`;
-      await sendConversion(email, conversionName);
-    }
-
-    // pago / aprovado
-    if (trigger === "order_approved" || orderStatus === "paid") {
-      status = "pago";
-      conversionName = `${baseConversion} - pago`;
-      await sendConversion(email, conversionName);
-    }
-
-    // reembolsado (se você quiser marcar na RD)
-    if (trigger === "order_refunded" || orderStatus === "refunded") {
-      status = "reembolsado";
-      conversionName = `${baseConversion} - reembolsado`;
-      await sendConversion(email, conversionName);
-    }
-
-    // salva evento cru no banco
-    saveEventAsync({
-      source: "kiwify",
-      trigger,
-      orderStatus,
-      email,
-      name,
-      productName,
-      status,
-      conversion: conversionName,
-      payload,
-    }).catch((err) => {
-      console.error("Erro ao salvar evento Kiwify no banco:", err.message);
-    });
-
+    console.log("Email não encontrado nem como Vindi nem como Kiwify, evento ignorado");
     res.sendStatus(200);
   } catch (err) {
-    console.error("Erro webhook Kiwify:", err.response?.data || err.message);
+    console.error("Erro no endpoint unificado:", err.response?.data || err.message);
     res.sendStatus(500);
   }
 });
@@ -380,7 +415,7 @@ function startEventProcessorLoop() {
 }
 
 app.get("/", (_, res) => {
-  res.send("Webhook Vindi e Kiwify → RD rodando");
+  res.send("Webhook unificado Vindi + Kiwify → RD rodando");
 });
 
 app.listen(PORT, () => {
