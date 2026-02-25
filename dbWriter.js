@@ -1,13 +1,16 @@
 const { Pool } = require("pg");
+const { normalizeProductName } = require("./productNormalizer");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // obrigatório no Render
+  ssl: { rejectUnauthorized: false },
 });
 
 async function saveEventAsync(event) {
   try {
     const client = await pool.connect();
+
+    const normalizedProductName = normalizeProductName(event.productName);
 
     await client.query(
       `
@@ -24,7 +27,7 @@ async function saveEventAsync(event) {
       [
         event.eventType,
         event.email,
-        event.productName,
+        normalizedProductName,
         event.conversion,
         event.status,
         event.payload,
@@ -32,11 +35,10 @@ async function saveEventAsync(event) {
     );
 
     client.release();
-    console.log("💾 Evento salvo no banco com sucesso");
+    console.log("Evento salvo no banco com sucesso");
   } catch (err) {
-    console.error("❌ ERRO AO SALVAR NO BANCO:", err.message);
+    console.error("Erro ao salvar no banco:", err.message);
   }
 }
 
 module.exports = { saveEventAsync };
-
